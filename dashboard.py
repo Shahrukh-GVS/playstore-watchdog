@@ -373,6 +373,9 @@ with tab2:
     if st.button("Refresh"):
         st.rerun()
 
+    if "confirm_delete_dev" not in st.session_state:
+        st.session_state.confirm_delete_dev = None
+
     developers = supabase.table("developers").select("*").order("first_seen", desc=True).execute().data
     apps_all = supabase.table("apps").select("*").execute().data
 
@@ -406,6 +409,29 @@ with tab2:
                 )
             else:
                 st.write("No apps recorded yet.")
+
+            st.markdown("---")
+
+            if st.session_state.confirm_delete_dev == dev["id"]:
+                st.warning(f"Remove **{dev['name']}** and all {len(dev_apps)} of its apps from your watchlist? This cannot be undone.")
+                col_yes, col_no = st.columns(2)
+                if col_yes.button("Yes, delete permanently", key=f"confirm_yes_{dev['id']}", type="primary"):
+                    app_ids = [a["id"] for a in dev_apps]
+                    if app_ids:
+                        supabase.table("change_log").delete().in_("app_id", app_ids).execute()
+                    supabase.table("change_log").delete().eq("developer_id", dev["id"]).execute()
+                    supabase.table("apps").delete().eq("developer_id", dev["id"]).execute()
+                    supabase.table("developers").delete().eq("id", dev["id"]).execute()
+                    st.session_state.confirm_delete_dev = None
+                    st.success(f"Removed {dev['name']}.")
+                    st.rerun()
+                if col_no.button("Cancel", key=f"confirm_no_{dev['id']}"):
+                    st.session_state.confirm_delete_dev = None
+                    st.rerun()
+            else:
+                if st.button("🗑️ Delete this account", key=f"delete_{dev['id']}"):
+                    st.session_state.confirm_delete_dev = dev["id"]
+                    st.rerun()
 
 # --- Tab 3: Recent Activity ---
 with tab3:
