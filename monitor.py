@@ -159,10 +159,15 @@ def send_digest(events):
 
     embeds = []
 
+    def play_link(package_name):
+        return f"https://play.google.com/store/apps/details?id={package_name}"
+
     for ev in events.get("new_upload", []):
+        link = play_link(ev["package_name"])
         embed = {
             "title": f"New upload: {ev['title']}",
-            "description": f"Package: `{ev['package_name']}`\nDeveloper: {ev['developer_name']}",
+            "url": link,
+            "description": f"Package: `{ev['package_name']}`\nDeveloper: {ev['developer_name']}\n[Open on Play Store]({link})",
             "color": COLOR_NEW,
         }
         if ev.get("icon_url"):
@@ -170,9 +175,12 @@ def send_digest(events):
         embeds.append(embed)
 
     for ev in events.get("transferred_in", []):
+        link = play_link(ev["package_name"])
         embed = {
             "title": f"Transferred in (already has installs): {ev['title']}",
-            "description": f"Package: `{ev['package_name']}`\nNow under: {ev['developer_name']}\nOrigin: {ev.get('origin', 'unknown')}",
+            "url": link,
+            "description": (f"Package: `{ev['package_name']}`\nNow under: {ev['developer_name']}\n"
+                             f"Origin: {ev.get('origin', 'unknown')}\n[Open on Play Store]({link})"),
             "color": COLOR_TRANSFER,
         }
         if ev.get("icon_url"):
@@ -180,27 +188,33 @@ def send_digest(events):
         embeds.append(embed)
 
     for ev in events.get("transferred", []):
+        link = play_link(ev["package_name"])
         embeds.append({
             "title": f"Transferred: {ev['title']}",
-            "description": f"Package: `{ev['package_name']}`\nFrom: {ev['old_dev']}\nTo: {ev['new_dev']}",
+            "url": link,
+            "description": (f"Package: `{ev['package_name']}`\nFrom: {ev['old_dev']}\nTo: {ev['new_dev']}\n"
+                             f"[Open on Play Store]({link})"),
             "color": COLOR_TRANSFER,
         })
 
     for ev in events.get("removed", []):
+        link = play_link(ev["package_name"])
         embeds.append({
             "title": f"Removed: {ev['title']}",
-            "description": f"Package: `{ev['package_name']}`\nLast known developer: {ev['developer_name']}",
+            "description": (f"Package: `{ev['package_name']}`\nLast known developer: {ev['developer_name']}\n"
+                             f"[Last known Play Store link]({link}) (likely dead now)"),
             "color": COLOR_REMOVED,
         })
 
     for ev in events.get("listing_changed", []):
+        link = play_link(ev["package_name"])
         desc = ""
         if ev.get("old_title") != ev.get("new_title"):
             desc += f"Title: **{ev['old_title']}** -> **{ev['new_title']}**\n"
         else:
             desc += f"Title: {ev['new_title']}\n"
-        desc += f"Package: `{ev['package_name']}`"
-        embed = {"title": "Listing changed", "description": desc, "color": COLOR_LISTING}
+        desc += f"Package: `{ev['package_name']}`\n[Open on Play Store]({link})"
+        embed = {"title": "Listing changed", "url": link, "description": desc, "color": COLOR_LISTING}
         if ev.get("old_icon_url"):
             embed["thumbnail"] = {"url": ev["old_icon_url"]}
         if ev.get("new_icon_url"):
