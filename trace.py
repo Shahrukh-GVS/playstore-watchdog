@@ -59,12 +59,13 @@ def fetch_app_page(package_name: str):
 
 
 def extract_website(soup: BeautifulSoup) -> str | None:
-    # Play Store "Visit website" link sits in an <a> tag with specific text/aria-label
+    # Play Store "Website" link text varies (sometimes just "Website", sometimes "Visit website")
     for a in soup.find_all("a", href=True):
         label = (a.get("aria-label") or "").lower()
         text = (a.get_text() or "").strip().lower()
-        if "website" in label or text == "visit website":
-            return a["href"]
+        href = a["href"]
+        if ("website" in label or "website" in text) and href.startswith("http"):
+            return href
     return None
 
 
