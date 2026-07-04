@@ -21,6 +21,7 @@ Always sends a message, even if nothing changed.
 
 import os
 import re
+import io
 import hashlib
 from datetime import datetime, timezone, timedelta
 
@@ -28,6 +29,8 @@ import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from supabase import create_client
+from PIL import Image
+import imagehash
 
 load_dotenv()
 
@@ -87,6 +90,21 @@ def extract_install_info(soup):
     if m:
         return False, m.group(1)
     return False, None
+
+
+def extract_canonical_title(soup):
+    """
+    The catalog listing page mashes title+rating+developer name together with
+    no separators, and the exact pattern varies per developer's page template.
+    Instead of trying to regex-parse that reliably, pull the title from the
+    app's own detail page <title> tag, which Google keeps clean for SEO
+    (e.g. "Police Simulator: Real Chase - Apps on Google Play").
+    """
+    if soup and soup.title and soup.title.string:
+        t = soup.title.string.strip()
+        t = re.sub(r'\s*-\s*Apps on Google Play\s*$', '', t, flags=re.IGNORECASE)
+        return t.strip()
+    return None
 
 
 def normalize_title(raw_title, developer_name=None):
@@ -170,15 +188,36 @@ def fetch_developer_catalog(dev_link, developer_name=None):
 
 
 def get_icon_hash(icon_url):
+    """
+    Perceptual hash instead of exact byte hash — Play Store's CDN sometimes
+    re-encodes the same icon slightly differently between requests, which
+    caused false 'icon changed' events even when visually identical.
+    Perceptual hashing tolerates that kind of minor recompression noise.
+    """
     if not icon_url:
         return None
     try:
         resp = requests.get(icon_url, headers=HEADERS, timeout=10)
         if resp.status_code != 200:
             return None
-        return hashlib.md5(resp.content).hexdigest()
+        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+        return str(imagehash.phash(img))
     except Exception:
         return None
+
+
+def icons_differ(old_hash_str, new_hash_str, threshold=6):
+    """True only if the perceptual hashes differ by more than `threshold` bits —
+    small differences (compression noise) are ignored; only real visual changes count."""
+    if not old_hash_str or not new_hash_str:
+        return False
+    try:
+        old_h = imagehash.hex_to_hash(old_hash_str)
+        new_h = imagehash.hex_to_hash(new_hash_str)
+        return (old_h - new_h) > threshold
+    except Exception:
+        # old hash might be from before this fix (different format) — can't compare, assume no change
+        return False
 
 
 def check_app_directly(package_name, last_status, last_seen_iso):
@@ -217,7 +256,7 @@ def send_digest(events, run_id=None):
     embeds = []
 
     def play_link(package_name):
-        return f"https://play.google.com/store/apps/details?id={package_name}"
+        return f"https://play.google.com/store/apps/details?id={package_name}&gl=us"
 
     for ev in events.get("new_upload", []):
         link = play_link(ev["package_name"])
@@ -357,11 +396,14 @@ def main():
             if soup:
                 is_pre_reg, installs = extract_install_info(soup)
 
+            canonical_title = extract_canonical_title(soup) if soup else None
+            final_title = canonical_title or fresh["title"]
+
             icon_hash = get_icon_hash(fresh["icon_url"])
             insert_res = supabase.table("apps").insert({
                 "package_name": package_name,
                 "developer_id": fresh["developer_id"],
-                "title": fresh["title"],
+                "title": final_title,
                 "icon_url": fresh["icon_url"],
                 "icon_hash": icon_hash,
                 "installs_bracket": installs,
@@ -372,21 +414,21 @@ def main():
 
             if is_pre_reg:
                 events["new_upload"].append({
-                    "package_name": package_name, "title": fresh["title"],
+                    "package_name": package_name, "title": final_title,
                     "developer_name": fresh["developer_name"], "icon_url": fresh["icon_url"],
                 })
-                log_change(new_app_id, fresh["developer_id"], "new_upload", None, {"title": fresh["title"]},
+                log_change(new_app_id, fresh["developer_id"], "new_upload", None, {"title": final_title},
                            run_id=run_id, developer_name=fresh["developer_name"],
-                           app_title=fresh["title"], package_name=package_name)
+                           app_title=final_title, package_name=package_name)
             else:
                 events["transferred_in"].append({
-                    "package_name": package_name, "title": fresh["title"],
+                    "package_name": package_name, "title": final_title,
                     "developer_name": fresh["developer_name"], "icon_url": fresh["icon_url"],
                     "origin": "unknown",
                 })
-                log_change(new_app_id, fresh["developer_id"], "transferred_in", None, {"title": fresh["title"]},
+                log_change(new_app_id, fresh["developer_id"], "transferred_in", None, {"title": final_title},
                            run_id=run_id, developer_name=fresh["developer_name"],
-                           app_title=fresh["title"], package_name=package_name)
+                           app_title=final_title, package_name=package_name)
             continue
 
         if stored["developer_id"] != fresh["developer_id"]:
@@ -408,17 +450,37 @@ def main():
             continue
 
         new_icon_hash = get_icon_hash(fresh["icon_url"])
-        title_changed = stored["title"] != fresh["title"]
-        icon_changed = bool(stored.get("icon_hash")) and bool(new_icon_hash) and stored["icon_hash"] != new_icon_hash
+        candidate_title_changed = stored["title"] != fresh["title"]
+        old_icon_hash = stored.get("icon_hash")
+        # Old entries may have an exact-byte hash (32 hex chars) from before this fix;
+        # can't meaningfully compare that to the new perceptual hash format, so just
+        # silently re-baseline it this cycle instead of comparing (and instead of
+        # permanently failing to detect icon changes on that app going forward).
+        needs_rebaseline = bool(old_icon_hash) and bool(new_icon_hash) and len(old_icon_hash) != len(new_icon_hash)
+        icon_changed = False if needs_rebaseline else icons_differ(old_icon_hash, new_icon_hash)
 
         update_fields = {"last_seen": datetime.now(timezone.utc).isoformat(), "status": "active"}
+        title_changed = False
+        confirmed_new_title = fresh["title"]
+
+        if candidate_title_changed:
+            # Catalog text looked different — confirm against the canonical detail-page title
+            # before trusting it, since catalog markup varies and can produce false positives.
+            detail_soup = fetch_app_page(package_name)
+            canonical_title = extract_canonical_title(detail_soup) if detail_soup else None
+            if canonical_title:
+                confirmed_new_title = canonical_title
+                title_changed = stored["title"] != canonical_title
+            else:
+                # Couldn't confirm — fall back to trusting the (possibly noisy) catalog comparison
+                title_changed = candidate_title_changed
 
         if title_changed or icon_changed:
             old_value = {}
             new_value = {}
             if title_changed:
                 old_value["title"] = stored["title"]
-                new_value["title"] = fresh["title"]
+                new_value["title"] = confirmed_new_title
             if icon_changed:
                 old_value["icon_url"] = stored.get("icon_url")
                 new_value["icon_url"] = fresh["icon_url"]
@@ -427,17 +489,20 @@ def main():
                 "package_name": package_name,
                 "title_changed": title_changed,
                 "icon_changed": icon_changed,
-                "old_title": stored["title"], "new_title": fresh["title"],
+                "old_title": stored["title"], "new_title": confirmed_new_title,
                 "old_icon_url": stored.get("icon_url"), "new_icon_url": fresh["icon_url"],
             })
             log_change(stored["id"], fresh["developer_id"], "listing_changed", old_value, new_value,
                        run_id=run_id, developer_name=fresh["developer_name"],
-                       app_title=fresh["title"], package_name=package_name)
-            update_fields["title"] = fresh["title"]
-            update_fields["icon_url"] = fresh["icon_url"]
-            update_fields["icon_hash"] = new_icon_hash
-        elif new_icon_hash and not stored.get("icon_hash"):
-            # First time we're able to compute a hash (e.g. old record never had one) — store it silently, no event
+                       app_title=confirmed_new_title, package_name=package_name)
+            if title_changed:
+                update_fields["title"] = confirmed_new_title
+            if icon_changed:
+                update_fields["icon_url"] = fresh["icon_url"]
+                update_fields["icon_hash"] = new_icon_hash
+        elif new_icon_hash and (not old_icon_hash or needs_rebaseline):
+            # First time we're able to compute a hash, or migrating from the old
+            # hash format — store it silently, no event
             update_fields["icon_hash"] = new_icon_hash
 
         supabase.table("apps").update(update_fields).eq("id", stored["id"]).execute()

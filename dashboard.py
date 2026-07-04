@@ -445,7 +445,7 @@ with tab3:
                     for c in dev_items:
                         package_name = c.get("package_name") or "-"
                         app_title = c.get("app_title") or "unknown"
-                        link = f"https://play.google.com/store/apps/details?id={package_name}" if package_name != "-" else None
+                        link = f"https://play.google.com/store/apps/details?id={package_name}&gl=us" if package_name != "-" else None
                         icon = event_icons.get(c["event_type"], "•")
                         event_type = c["event_type"]
 
