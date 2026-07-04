@@ -434,11 +434,48 @@ with tab4:
     if not ids_data:
         st.info("No ad network IDs added yet.")
     else:
+        if "editing_id" not in st.session_state:
+            st.session_state.editing_id = None
+
         for row in ids_data:
-            col1, col2, col3, col4 = st.columns([2, 3, 2, 1])
-            col1.write(row["network"])
-            col2.code(row["account_id"])
-            col3.write(row.get("label") or "-")
-            if col4.button("Delete", key=f"del_{row['id']}"):
-                supabase.table("ad_network_ids").delete().eq("id", row["id"]).execute()
-                st.rerun()
+            if st.session_state.editing_id == row["id"]:
+                # Edit mode for this row
+                with st.form(f"edit_form_{row['id']}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        new_network = st.text_input("Network", value=row["network"])
+                    with col2:
+                        new_account_id = st.text_input("Account ID", value=row["account_id"])
+                    new_label = st.text_input("Label", value=row.get("label") or "")
+
+                    save_col, cancel_col = st.columns(2)
+                    save_clicked = save_col.form_submit_button("Save", type="primary")
+                    cancel_clicked = cancel_col.form_submit_button("Cancel")
+
+                    if save_clicked:
+                        if not new_network.strip() or not new_account_id.strip():
+                            st.warning("Network and Account ID cannot be empty.")
+                        else:
+                            supabase.table("ad_network_ids").update({
+                                "network": new_network.strip(),
+                                "account_id": new_account_id.strip(),
+                                "label": new_label.strip() or None,
+                            }).eq("id", row["id"]).execute()
+                            st.session_state.editing_id = None
+                            st.rerun()
+
+                    if cancel_clicked:
+                        st.session_state.editing_id = None
+                        st.rerun()
+            else:
+                # Normal display row
+                col1, col2, col3, col4, col5 = st.columns([2, 3, 2, 1, 1])
+                col1.write(row["network"])
+                col2.code(row["account_id"])
+                col3.write(row.get("label") or "-")
+                if col4.button("Edit", key=f"edit_{row['id']}"):
+                    st.session_state.editing_id = row["id"]
+                    st.rerun()
+                if col5.button("Delete", key=f"del_{row['id']}"):
+                    supabase.table("ad_network_ids").delete().eq("id", row["id"]).execute()
+                    st.rerun()
