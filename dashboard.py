@@ -434,7 +434,13 @@ with tab3:
                     by_dev.setdefault(dev_name, []).append(c)
 
                 for dev_name, dev_items in by_dev.items():
-                    st.markdown(f"### {dev_name}")
+                    st.markdown(
+                        f"<div style='background-color:#1e2530; padding:10px 14px; "
+                        f"border-radius:6px; margin-top:14px; margin-bottom:10px;'>"
+                        f"<span style='font-size:22px; font-weight:700;'>🏢 {dev_name}</span>"
+                        f"</div>",
+                        unsafe_allow_html=True,
+                    )
 
                     for c in dev_items:
                         package_name = c.get("package_name") or "-"
