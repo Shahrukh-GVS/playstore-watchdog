@@ -426,31 +426,59 @@ with tab3:
             "removed": "🗑️", "listing_changed": "🎨",
         }
 
+        if "expanded_accounts" not in st.session_state:
+            st.session_state.expanded_accounts = set()
+        if "expanded_items" not in st.session_state:
+            st.session_state.expanded_items = set()
+
         for run in runs:
             with st.expander(f"Check run — {run['time']}  ({len(run['items'])} change(s))", expanded=False):
-                # Group this run's items by developer
                 by_dev = {}
                 for c in run["items"]:
                     dev_name = c.get("developer_name") or "Unknown developer"
                     by_dev.setdefault(dev_name, []).append(c)
 
                 for dev_name, dev_items in by_dev.items():
-                    st.markdown(f"#### {dev_name}  \n*{len(dev_items)} change(s)*")
-                    for c in dev_items:
+                    acc_key = f"{run['run_id']}::{dev_name}"
+                    acc_expanded = acc_key in st.session_state.expanded_accounts
+
+                    acol1, acol2 = st.columns([0.5, 9.5])
+                    with acol1:
+                        if st.button("▼" if acc_expanded else "▶", key=f"acc_btn_{acc_key}"):
+                            if acc_expanded:
+                                st.session_state.expanded_accounts.discard(acc_key)
+                            else:
+                                st.session_state.expanded_accounts.add(acc_key)
+                            st.rerun()
+                    with acol2:
+                        st.markdown(f"**{dev_name}**  \n*{len(dev_items)} change(s)*")
+
+                    if acc_expanded:
+                        for c in dev_items:
+                            item_key = f"{acc_key}::{c['id']}"
+                            item_expanded = item_key in st.session_state.expanded_items
+
                             package_name = c.get("package_name") or "-"
                             app_title = c.get("app_title") or "unknown"
                             link = f"https://play.google.com/store/apps/details?id={package_name}" if package_name != "-" else None
                             icon = event_icons.get(c["event_type"], "•")
 
-                            col1, col2 = st.columns([3, 5])
-                            with col1:
+                            _, icol1, icol2 = st.columns([0.5, 0.5, 8.5])
+                            with icol1:
+                                if st.button("▼" if item_expanded else "▶", key=f"item_btn_{item_key}"):
+                                    if item_expanded:
+                                        st.session_state.expanded_items.discard(item_key)
+                                    else:
+                                        st.session_state.expanded_items.add(item_key)
+                                    st.rerun()
+                            with icol2:
                                 if link:
-                                    st.markdown(f"{icon} **[{app_title}]({link})**")
+                                    st.markdown(f"{icon} **[{app_title}]({link})** — {c['event_type']}")
                                 else:
-                                    st.markdown(f"{icon} **{app_title}**")
-                                st.caption(f"Package: `{package_name}`")
+                                    st.markdown(f"{icon} **{app_title}** — {c['event_type']}")
 
-                            with col2:
+                            if item_expanded:
+                                st.caption(f"Package: `{package_name}`")
                                 old_val = c.get("old_value") or {}
                                 new_val = c.get("new_value") or {}
                                 event_type = c["event_type"]
@@ -475,7 +503,7 @@ with tab3:
                                 elif event_type == "removed":
                                     st.write("No longer available under this developer / any watched account.")
 
-                            st.divider()
+                            st.markdown("---")
 
 # --- Tab 4: Manage Ad IDs ---
 with tab4:
