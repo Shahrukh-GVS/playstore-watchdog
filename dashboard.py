@@ -243,7 +243,10 @@ with tab1:
                 result = run_trace(url_input.strip())
 
             if result["status"] == "match":
-                st.success(result["message"])
+                st.success(
+                    f"{result['message']}\n\n"
+                    f"**Matched ID:** `{result['matched_id']}` on `{result['domain']}` (DIRECT)"
+                )
             elif result["status"] == "no_match":
                 st.info(result["message"])
             elif result["status"] == "warn":
