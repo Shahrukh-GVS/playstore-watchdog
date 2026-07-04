@@ -289,9 +289,22 @@ def run_trace(url):
     if not dev_link:
         return {"status": "error", "message": "Match found but could not extract developer page link."}
 
+    dev_id_match = re.search(r"[?&]id=([a-zA-Z0-9._+-]+)", dev_link)
+    dev_id_str = dev_id_match.group(1) if dev_id_match else dev_link
+    existing_dev_check = supabase.table("developers").select("id").eq("dev_id", dev_id_str).execute()
+    already_existed = bool(existing_dev_check.data)
+
     developer_id = upsert_developer(dev_name, dev_link)
     catalog = fetch_developer_catalog(dev_link, developer_name=dev_name)
     inserted = insert_apps(developer_id, catalog)
+
+    if already_existed:
+        return {
+            "status": "already_exists",
+            "message": f"**{dev_name}** is already in your watchlist. {len(catalog)} apps found, {inserted} newly added (if any new games were released).",
+            "matched_id": account_id,
+            "domain": domain,
+        }
 
     return {
         "status": "match",
@@ -332,6 +345,11 @@ with tab1:
 
                 if result["status"] == "match":
                     st.success(
+                        f"**{label}**\n\n{result['message']}\n\n"
+                        f"**Matched ID:** `{result['matched_id']}` on `{result['domain']}` (DIRECT)"
+                    )
+                elif result["status"] == "already_exists":
+                    st.warning(
                         f"**{label}**\n\n{result['message']}\n\n"
                         f"**Matched ID:** `{result['matched_id']}` on `{result['domain']}` (DIRECT)"
                     )
