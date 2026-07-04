@@ -267,20 +267,14 @@ def run_trace(url):
 
     soup = fetch_app_page(package_name)
     if not soup:
-        msg = f"❌ **Trace failed** — could not load Play Store page for `{package_name}`"
-        send_discord(msg)
         return {"status": "error", "message": f"Could not load Play Store page for `{package_name}`."}
 
     website = extract_website(soup)
     if not website:
-        msg = f"⚠️ **Trace incomplete** — `{package_name}` has no website listed. Skipping."
-        send_discord(msg)
         return {"status": "warn", "message": f"`{package_name}` has no website listed. Skipped."}
 
     ads_txt_raw = fetch_app_ads_txt(website)
     if not ads_txt_raw:
-        msg = f"⚠️ **Trace incomplete** — no app-ads.txt found at `{website}` for `{package_name}`."
-        send_discord(msg)
         return {"status": "warn", "message": f"No app-ads.txt found at {website}."}
 
     ads_lines = parse_app_ads_lines(ads_txt_raw)
@@ -288,30 +282,16 @@ def run_trace(url):
     match = find_match(ads_lines, known_ids)
 
     if not match:
-        msg = (f"🔍 **Trace complete — no match**\n"
-               f"Package: `{package_name}`\nWebsite: {website}\n"
-               f"No known ad IDs matched with DIRECT relationship.")
-        send_discord(msg)
         return {"status": "no_match", "message": f"No known ad IDs matched (DIRECT) for `{package_name}`."}
 
     domain, account_id, relationship = match
     dev_name, dev_link = extract_developer_info(soup)
     if not dev_link:
-        msg = f"⚠️ Match found for `{package_name}` but could not extract developer page link."
-        send_discord(msg)
         return {"status": "error", "message": "Match found but could not extract developer page link."}
 
     developer_id = upsert_developer(dev_name, dev_link)
     catalog = fetch_developer_catalog(dev_link, developer_name=dev_name)
     inserted = insert_apps(developer_id, catalog)
-
-    msg = (f"✅ **Match confirmed — developer added to watchlist**\n"
-           f"Developer: **{dev_name}**\n"
-           f"Matched ID: `{account_id}` ({domain}, DIRECT)\n"
-           f"Total apps found: {len(catalog)} | Newly added: {inserted}\n"
-           f"Developer page: {dev_link}\n"
-           f"(traced via dashboard)")
-    send_discord(msg)
 
     return {
         "status": "match",
