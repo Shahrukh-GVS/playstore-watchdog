@@ -74,7 +74,7 @@ def unwrap_google_redirect(url):
 
 def extract_developer_info(soup):
     for a in soup.find_all("a", href=True):
-        if "/store/apps/developer?id=" in a["href"]:
+        if "/store/apps/developer?id=" in a["href"] or "/store/apps/dev?id=" in a["href"]:
             dev_link = "https://play.google.com" + a["href"] if a["href"].startswith("/") else a["href"]
             dev_name = a.get_text(strip=True)
             return dev_name, dev_link

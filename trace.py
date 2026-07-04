@@ -84,7 +84,7 @@ def extract_developer_info(soup: BeautifulSoup):
     dev_link = None
     dev_name = None
     for a in soup.find_all("a", href=True):
-        if "/store/apps/developer?id=" in a["href"]:
+        if "/store/apps/developer?id=" in a["href"] or "/store/apps/dev?id=" in a["href"]:
             dev_link = "https://play.google.com" + a["href"] if a["href"].startswith("/") else a["href"]
             dev_name = a.get_text(strip=True) or dev_name
             break
