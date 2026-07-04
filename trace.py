@@ -91,32 +91,55 @@ def extract_developer_info(soup: BeautifulSoup):
     return dev_name, dev_link
 
 
-def fetch_app_ads_txt(website: str) -> str | None:
-    website = website.rstrip("/")
-    if not website.startswith("http"):
-        website = "https://" + website
-    url = f"{website}/app-ads.txt"
-
-    # Some sites block Python's requests library based on TLS fingerprint
-    # (even with a browser User-Agent) but allow real browsers/curl.
-    # curl_cffi impersonates an actual browser's TLS handshake to get past this.
+def fetch_url_content(url):
+    """Try curl_cffi first (bypasses TLS fingerprint blocking), fall back to requests."""
     try:
         from curl_cffi import requests as cf_requests
         resp = cf_requests.get(url, headers=HEADERS, timeout=15, impersonate="chrome124")
         if resp.status_code == 200:
             return resp.text
-        print(f"[warn] app-ads.txt fetch (curl_cffi) returned status {resp.status_code} for {url}")
-    except Exception as e:
-        print(f"[warn] curl_cffi fetch failed for {url}: {e}")
-
-    # Fallback to plain requests in case curl_cffi itself has an issue
+    except Exception:
+        pass
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
             return resp.text
-        print(f"[warn] app-ads.txt fetch (requests) returned status {resp.status_code} for {url}")
-    except Exception as e:
-        print(f"[warn] requests fetch failed for {url}: {e}")
+    except Exception:
+        pass
+    return None
+
+
+def looks_like_ads_txt(text):
+    """Basic sanity check that the content is actually an ads.txt-style file."""
+    if not text:
+        return False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3 and parts[2].upper() in ("DIRECT", "RESELLER"):
+            return True
+    return False
+
+
+def fetch_app_ads_txt(website: str) -> str | None:
+    candidates = []
+
+    # If the extracted "website" itself already points at a .txt file, try it as-is first
+    if website.lower().endswith(".txt"):
+        candidates.append(website)
+
+    parsed = urllib.parse.urlparse(website if website.startswith("http") else "https://" + website)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    candidates.append(f"{root}/app-ads.txt")
+    candidates.append(f"{root}/ads.txt")
+
+    for url in candidates:
+        content = fetch_url_content(url)
+        if content and looks_like_ads_txt(content):
+            print(f"[info] Found valid ads.txt-style content at {url}")
+            return content
 
     return None
 
