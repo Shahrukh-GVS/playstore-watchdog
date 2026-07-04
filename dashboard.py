@@ -1,0 +1,296 @@
+"""
+dashboard.py — Play Store Watchdog: Web Dashboard
+
+Run locally in Codespaces with:
+    streamlit run dashboard.py
+
+Or deploy free via Streamlit Community Cloud (share.streamlit.io) pointing
+at this file in your GitHub repo.
+
+Three tabs:
+  1. Trace       - paste a Play Store URL, runs the app-ads.txt match + auto-add logic
+  2. Watchlist   - developers grouped, expandable to show their apps
+  3. Recent Activity - change_log, most recent first, filterable by event type
+"""
+
+import os
+import re
+import requests
+import streamlit as st
+from bs4 import BeautifulSoup
+from supabase import create_client
+
+st.set_page_config(page_title="Play Store Watchdog", layout="wide")
+
+SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY"))
+DISCORD_WEBHOOK_URL = st.secrets.get("DISCORD_WEBHOOK_URL", os.getenv("DISCORD_WEBHOOK_URL"))
+
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+}
+
+
+# ---------------------------------------------------------------------------
+# Shared tracing logic (same as trace.py, reused here for the dashboard button)
+# ---------------------------------------------------------------------------
+
+def extract_package_name(url):
+    m = re.search(r"[?&]id=([a-zA-Z0-9._]+)", url)
+    return m.group(1) if m else None
+
+
+def fetch_app_page(package_name, country="us"):
+    url = f"https://play.google.com/store/apps/details?id={package_name}&gl={country}&hl=en"
+    resp = requests.get(url, headers=HEADERS, timeout=15)
+    if resp.status_code != 200:
+        return None
+    return BeautifulSoup(resp.text, "html.parser")
+
+
+def extract_website(soup):
+    for a in soup.find_all("a", href=True):
+        label = (a.get("aria-label") or "").lower()
+        text = (a.get_text() or "").strip().lower()
+        if "website" in label or text == "visit website":
+            return a["href"]
+    return None
+
+
+def extract_developer_info(soup):
+    for a in soup.find_all("a", href=True):
+        if "/store/apps/developer?id=" in a["href"]:
+            dev_link = "https://play.google.com" + a["href"] if a["href"].startswith("/") else a["href"]
+            dev_name = a.get_text(strip=True)
+            return dev_name, dev_link
+    return None, None
+
+
+def fetch_app_ads_txt(website):
+    website = website.rstrip("/")
+    if not website.startswith("http"):
+        website = "https://" + website
+    try:
+        resp = requests.get(f"{website}/app-ads.txt", headers=HEADERS, timeout=15)
+        if resp.status_code != 200:
+            return None
+        return resp.text
+    except Exception:
+        return None
+
+
+def parse_app_ads_lines(raw_text):
+    lines = []
+    for line in raw_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 3:
+            lines.append((parts[0], parts[1], parts[2]))
+    return lines
+
+
+def get_known_ids():
+    result = supabase.table("ad_network_ids").select("account_id").execute()
+    return {row["account_id"] for row in result.data}
+
+
+def find_match(ads_lines, known_ids):
+    for domain, account_id, relationship in ads_lines:
+        if account_id in known_ids and relationship.upper() == "DIRECT":
+            return (domain, account_id, relationship)
+    return None
+
+
+def fetch_developer_catalog(dev_link):
+    resp = requests.get(dev_link, headers=HEADERS, timeout=15)
+    if resp.status_code != 200:
+        return []
+    soup = BeautifulSoup(resp.text, "html.parser")
+    apps, seen = [], set()
+    for a in soup.find_all("a", href=True):
+        m = re.search(r"/store/apps/details\?id=([a-zA-Z0-9._]+)", a["href"])
+        if not m:
+            continue
+        package_name = m.group(1)
+        if package_name in seen:
+            continue
+        seen.add(package_name)
+        title = a.get("aria-label") or a.get_text(strip=True) or package_name
+        img = a.find("img")
+        icon_url = img["src"] if img and img.has_attr("src") else None
+        apps.append({"package_name": package_name, "title": title, "icon_url": icon_url})
+    return apps
+
+
+def upsert_developer(dev_name, dev_link):
+    m = re.search(r"[?&]id=([a-zA-Z0-9._+-]+)", dev_link)
+    dev_id = m.group(1) if m else dev_link
+    existing = supabase.table("developers").select("id").eq("dev_id", dev_id).execute()
+    if existing.data:
+        return existing.data[0]["id"]
+    result = supabase.table("developers").insert({
+        "dev_id": dev_id, "name": dev_name, "developer_url": dev_link, "source": "trace",
+    }).execute()
+    return result.data[0]["id"]
+
+
+def insert_apps(developer_id, apps):
+    inserted = 0
+    for app in apps:
+        existing = supabase.table("apps").select("id").eq("package_name", app["package_name"]).execute()
+        if existing.data:
+            continue
+        supabase.table("apps").insert({
+            "package_name": app["package_name"], "developer_id": developer_id,
+            "title": app["title"], "icon_url": app["icon_url"], "status": "active",
+        }).execute()
+        inserted += 1
+    return inserted
+
+
+def run_trace(url):
+    package_name = extract_package_name(url)
+    if not package_name:
+        return {"status": "error", "message": "Could not extract package name from that URL."}
+
+    soup = fetch_app_page(package_name)
+    if not soup:
+        return {"status": "error", "message": f"Could not load Play Store page for `{package_name}`."}
+
+    website = extract_website(soup)
+    if not website:
+        return {"status": "warn", "message": f"`{package_name}` has no website listed. Skipped."}
+
+    ads_txt_raw = fetch_app_ads_txt(website)
+    if not ads_txt_raw:
+        return {"status": "warn", "message": f"No app-ads.txt found at {website}."}
+
+    ads_lines = parse_app_ads_lines(ads_txt_raw)
+    known_ids = get_known_ids()
+    match = find_match(ads_lines, known_ids)
+
+    if not match:
+        return {"status": "no_match", "message": f"No known ad IDs matched (DIRECT) for `{package_name}`."}
+
+    domain, account_id, relationship = match
+    dev_name, dev_link = extract_developer_info(soup)
+    if not dev_link:
+        return {"status": "error", "message": "Match found but could not extract developer page link."}
+
+    developer_id = upsert_developer(dev_name, dev_link)
+    catalog = fetch_developer_catalog(dev_link)
+    inserted = insert_apps(developer_id, catalog)
+
+    return {
+        "status": "match",
+        "message": f"Match confirmed — **{dev_name}** added. {len(catalog)} apps found, {inserted} newly added.",
+        "matched_id": account_id,
+        "domain": domain,
+    }
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+
+st.title("Play Store Watchdog")
+
+tab1, tab2, tab3 = st.tabs(["🔍 Trace", "📋 Watchlist", "🕒 Recent Activity"])
+
+# --- Tab 1: Trace ---
+with tab1:
+    st.subheader("Trace a new game")
+    url_input = st.text_input("Paste the Play Store game URL")
+    if st.button("Run Trace", type="primary"):
+        if not url_input.strip():
+            st.warning("Please paste a URL first.")
+        else:
+            with st.spinner("Tracing..."):
+                result = run_trace(url_input.strip())
+
+            if result["status"] == "match":
+                st.success(result["message"])
+            elif result["status"] == "no_match":
+                st.info(result["message"])
+            elif result["status"] == "warn":
+                st.warning(result["message"])
+            else:
+                st.error(result["message"])
+
+# --- Tab 2: Watchlist ---
+with tab2:
+    st.subheader("Watched developers")
+
+    if st.button("Refresh"):
+        st.rerun()
+
+    developers = supabase.table("developers").select("*").order("first_seen", desc=True).execute().data
+    apps_all = supabase.table("apps").select("*").execute().data
+
+    if not developers:
+        st.info("No developers tracked yet. Use the Trace tab to add one.")
+
+    for dev in developers:
+        dev_apps = [a for a in apps_all if a["developer_id"] == dev["id"]]
+        active_count = len([a for a in dev_apps if a["status"] == "active"])
+        removed_count = len([a for a in dev_apps if a["status"] == "removed"])
+
+        with st.expander(f"**{dev['name']}** — {active_count} active, {removed_count} removed ({len(dev_apps)} total)"):
+            st.caption(f"Developer page: {dev['developer_url']}")
+            st.caption(f"Source: {dev.get('source', 'unknown')} | Last checked: {dev.get('last_checked', 'never')}")
+
+            if dev_apps:
+                table_data = [{
+                    "Icon": a.get("icon_url"),
+                    "Title": a["title"],
+                    "Package": a["package_name"],
+                    "Status": a["status"],
+                    "Installs": a.get("installs_bracket") or "-",
+                    "Pre-registration": "Yes" if a.get("is_pre_registration") else "No",
+                } for a in dev_apps]
+
+                st.dataframe(
+                    table_data,
+                    column_config={"Icon": st.column_config.ImageColumn("Icon", width="small")},
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.write("No apps recorded yet.")
+
+# --- Tab 3: Recent Activity ---
+with tab3:
+    st.subheader("Recent Activity")
+
+    event_filter = st.selectbox(
+        "Filter by event type",
+        ["All", "new_upload", "transferred_in", "transferred", "removed", "listing_changed"],
+    )
+
+    query = supabase.table("change_log").select("*").order("detected_at", desc=True).limit(200)
+    if event_filter != "All":
+        query = query.eq("event_type", event_filter)
+    changes = query.execute().data
+
+    apps_lookup = {a["id"]: a for a in supabase.table("apps").select("*").execute().data}
+
+    if not changes:
+        st.info("No activity recorded yet.")
+    else:
+        table_data = []
+        for c in changes:
+            app = apps_lookup.get(c["app_id"], {})
+            table_data.append({
+                "Time": c["detected_at"],
+                "Event": c["event_type"],
+                "App": app.get("title", "unknown"),
+                "Package": app.get("package_name", "-"),
+                "Old": str(c.get("old_value") or "-"),
+                "New": str(c.get("new_value") or "-"),
+            })
+        st.dataframe(table_data, use_container_width=True, hide_index=True)

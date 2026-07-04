@@ -3,3 +3,4 @@ beautifulsoup4
 supabase
 python-dotenv
 Pillow
+streamlit
