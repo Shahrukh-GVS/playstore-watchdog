@@ -366,28 +366,75 @@ with tab3:
         ["All", "new_upload", "transferred_in", "transferred", "removed", "listing_changed"],
     )
 
-    query = supabase.table("change_log").select("*").order("detected_at", desc=True).limit(200)
+    query = supabase.table("change_log").select("*").order("detected_at", desc=True).limit(500)
     if event_filter != "All":
         query = query.eq("event_type", event_filter)
     changes = query.execute().data
 
-    apps_lookup = {a["id"]: a for a in supabase.table("apps").select("*").execute().data}
-
     if not changes:
         st.info("No activity recorded yet.")
     else:
-        table_data = []
+        # Group consecutive entries by run_id (falls back to per-row if run_id missing, e.g. older data)
+        runs = []
+        current_run_id = object()
+        current_group = None
         for c in changes:
-            app = apps_lookup.get(c["app_id"], {})
-            table_data.append({
-                "Time": c["detected_at"],
-                "Event": c["event_type"],
-                "App": app.get("title", "unknown"),
-                "Package": app.get("package_name", "-"),
-                "Old": str(c.get("old_value") or "-"),
-                "New": str(c.get("new_value") or "-"),
-            })
-        st.dataframe(table_data, use_container_width=True, hide_index=True)
+            rid = c.get("run_id") or f"unknown_{c['id']}"
+            if rid != current_run_id:
+                current_run_id = rid
+                current_group = {"run_id": rid, "time": c["detected_at"], "items": []}
+                runs.append(current_group)
+            current_group["items"].append(c)
+
+        event_icons = {
+            "new_upload": "🆕", "transferred_in": "📥", "transferred": "🔀",
+            "removed": "🗑️", "listing_changed": "🎨",
+        }
+
+        for run in runs:
+            with st.expander(f"Check run — {run['time']}  ({len(run['items'])} change(s))", expanded=False):
+                for c in run["items"]:
+                    package_name = c.get("package_name") or "-"
+                    app_title = c.get("app_title") or "unknown"
+                    dev_name = c.get("developer_name") or "unknown"
+                    link = f"https://play.google.com/store/apps/details?id={package_name}" if package_name != "-" else None
+                    icon = event_icons.get(c["event_type"], "•")
+
+                    col1, col2 = st.columns([3, 5])
+                    with col1:
+                        if link:
+                            st.markdown(f"{icon} **[{app_title}]({link})**")
+                        else:
+                            st.markdown(f"{icon} **{app_title}**")
+                        st.caption(f"Developer: {dev_name} | Package: `{package_name}`")
+
+                    with col2:
+                        old_val = c.get("old_value") or {}
+                        new_val = c.get("new_value") or {}
+                        event_type = c["event_type"]
+
+                        if event_type == "listing_changed":
+                            # Only show fields that actually changed
+                            lines = []
+                            if "title" in new_val:
+                                lines.append(f"Title: **{old_val.get('title')}** → **{new_val.get('title')}**")
+                            if "icon_url" in new_val:
+                                lines.append("Icon changed:")
+                            st.write("\n".join(lines) if lines else "No visible field changes recorded.")
+                            if "icon_url" in new_val:
+                                ic1, ic2 = st.columns(2)
+                                ic1.image(old_val.get("icon_url"), caption="Before", width=80)
+                                ic2.image(new_val.get("icon_url"), caption="After", width=80)
+                        elif event_type == "transferred":
+                            st.write(f"From **{old_val.get('developer')}** → **{new_val.get('developer')}**")
+                        elif event_type == "new_upload":
+                            st.write("New pre-registration listing appeared.")
+                        elif event_type == "transferred_in":
+                            st.write("Appeared with existing installs (moved from elsewhere, origin unknown).")
+                        elif event_type == "removed":
+                            st.write("No longer available under this developer / any watched account.")
+
+                    st.divider()
 
 # --- Tab 4: Manage Ad IDs ---
 with tab4:

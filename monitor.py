@@ -89,6 +89,18 @@ def extract_install_info(soup):
     return False, None
 
 
+def clean_title(raw_title):
+    """
+    Play Store catalog listings often use an aria-label like
+    'Game Name, Rated 4.5 stars, Free, Contains ads' instead of just the title.
+    This strips everything after the first comma so title comparisons don't
+    false-positive just because a star rating changed.
+    """
+    if not raw_title:
+        return raw_title
+    return raw_title.split(",")[0].strip()
+
+
 def fetch_developer_catalog(dev_link):
     try:
         resp = requests.get(dev_link, headers=HEADERS, timeout=15)
@@ -109,6 +121,7 @@ def fetch_developer_catalog(dev_link):
             continue
         seen.add(package_name)
         title = a.get("aria-label") or a.get_text(strip=True) or package_name
+        title = clean_title(title)
         img = a.find("img")
         icon_url = img["src"] if img and img.has_attr("src") else None
         apps.append({"package_name": package_name, "title": title, "icon_url": icon_url})
@@ -144,17 +157,20 @@ def check_app_directly(package_name, last_status, last_seen_iso):
     return "removed", None
 
 
-def send_digest(events):
+def send_digest(events, run_id=None):
     total = sum(len(v) for v in events.values())
+    footer = {"text": f"Check run: {run_id}"} if run_id else None
+
     if total == 0:
-        requests.post(DISCORD_WEBHOOK_URL, json={
-            "embeds": [{
-                "title": "Watchdog check complete",
-                "description": "Nothing new this cycle. All watched accounts checked.",
-                "color": COLOR_INFO,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }]
-        }, timeout=15)
+        embed = {
+            "title": "Watchdog check complete",
+            "description": "Nothing new this cycle. All watched accounts checked.",
+            "color": COLOR_INFO,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if footer:
+            embed["footer"] = footer
+        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
         return
 
     embeds = []
@@ -208,18 +224,24 @@ def send_digest(events):
 
     for ev in events.get("listing_changed", []):
         link = play_link(ev["package_name"])
-        desc = ""
-        if ev.get("old_title") != ev.get("new_title"):
-            desc += f"Title: **{ev['old_title']}** -> **{ev['new_title']}**\n"
-        else:
-            desc += f"Title: {ev['new_title']}\n"
-        desc += f"Package: `{ev['package_name']}`\n[Open on Play Store]({link})"
-        embed = {"title": "Listing changed", "url": link, "description": desc, "color": COLOR_LISTING}
-        if ev.get("old_icon_url"):
-            embed["thumbnail"] = {"url": ev["old_icon_url"]}
-        if ev.get("new_icon_url"):
-            embed["image"] = {"url": ev["new_icon_url"]}
+        desc_lines = []
+        if ev.get("title_changed"):
+            desc_lines.append(f"Title: **{ev['old_title']}** -> **{ev['new_title']}**")
+        if ev.get("icon_changed"):
+            desc_lines.append("Icon changed (see images below)")
+        desc_lines.append(f"Package: `{ev['package_name']}`")
+        desc_lines.append(f"[Open on Play Store]({link})")
+
+        embed = {"title": "Listing changed", "url": link, "description": "\n".join(desc_lines), "color": COLOR_LISTING}
+        if ev.get("icon_changed"):
+            if ev.get("old_icon_url"):
+                embed["thumbnail"] = {"url": ev["old_icon_url"]}
+            if ev.get("new_icon_url"):
+                embed["image"] = {"url": ev["new_icon_url"]}
         embeds.append(embed)
+
+    if footer and embeds:
+        embeds[-1]["footer"] = footer
 
     for i in range(0, len(embeds), 10):
         batch = embeds[i:i + 10]
@@ -240,17 +262,24 @@ def upsert_developer(dev_name, dev_link):
     return result.data[0]["id"]
 
 
-def log_change(app_id, developer_id, event_type, old_value, new_value):
+def log_change(app_id, developer_id, event_type, old_value, new_value,
+                run_id=None, developer_name=None, app_title=None, package_name=None):
     supabase.table("change_log").insert({
         "app_id": app_id,
         "developer_id": developer_id,
         "event_type": event_type,
         "old_value": old_value,
         "new_value": new_value,
+        "run_id": run_id,
+        "developer_name": developer_name,
+        "app_title": app_title,
+        "package_name": package_name,
     }).execute()
 
 
 def main():
+    run_id = datetime.now(timezone.utc).isoformat()
+
     events = {
         "new_upload": [], "transferred_in": [], "transferred": [],
         "removed": [], "listing_changed": [],
@@ -305,14 +334,18 @@ def main():
                     "package_name": package_name, "title": fresh["title"],
                     "developer_name": fresh["developer_name"], "icon_url": fresh["icon_url"],
                 })
-                log_change(new_app_id, fresh["developer_id"], "new_upload", None, {"title": fresh["title"]})
+                log_change(new_app_id, fresh["developer_id"], "new_upload", None, {"title": fresh["title"]},
+                           run_id=run_id, developer_name=fresh["developer_name"],
+                           app_title=fresh["title"], package_name=package_name)
             else:
                 events["transferred_in"].append({
                     "package_name": package_name, "title": fresh["title"],
                     "developer_name": fresh["developer_name"], "icon_url": fresh["icon_url"],
                     "origin": "unknown",
                 })
-                log_change(new_app_id, fresh["developer_id"], "transferred_in", None, {"title": fresh["title"]})
+                log_change(new_app_id, fresh["developer_id"], "transferred_in", None, {"title": fresh["title"]},
+                           run_id=run_id, developer_name=fresh["developer_name"],
+                           app_title=fresh["title"], package_name=package_name)
             continue
 
         if stored["developer_id"] != fresh["developer_id"]:
@@ -328,26 +361,42 @@ def main():
                 "old_dev": old_dev_name, "new_dev": new_dev_name,
             })
             log_change(stored["id"], fresh["developer_id"], "transferred",
-                       {"developer": old_dev_name}, {"developer": new_dev_name})
+                       {"developer": old_dev_name}, {"developer": new_dev_name},
+                       run_id=run_id, developer_name=new_dev_name,
+                       app_title=fresh["title"], package_name=package_name)
             continue
 
         new_icon_hash = get_icon_hash(fresh["icon_url"])
         title_changed = stored["title"] != fresh["title"]
-        icon_changed = stored.get("icon_hash") and new_icon_hash and stored["icon_hash"] != new_icon_hash
+        icon_changed = bool(stored.get("icon_hash")) and bool(new_icon_hash) and stored["icon_hash"] != new_icon_hash
 
         update_fields = {"last_seen": datetime.now(timezone.utc).isoformat(), "status": "active"}
 
         if title_changed or icon_changed:
+            old_value = {}
+            new_value = {}
+            if title_changed:
+                old_value["title"] = stored["title"]
+                new_value["title"] = fresh["title"]
+            if icon_changed:
+                old_value["icon_url"] = stored.get("icon_url")
+                new_value["icon_url"] = fresh["icon_url"]
+
             events["listing_changed"].append({
                 "package_name": package_name,
+                "title_changed": title_changed,
+                "icon_changed": icon_changed,
                 "old_title": stored["title"], "new_title": fresh["title"],
                 "old_icon_url": stored.get("icon_url"), "new_icon_url": fresh["icon_url"],
             })
-            log_change(stored["id"], fresh["developer_id"], "listing_changed",
-                       {"title": stored["title"], "icon_url": stored.get("icon_url")},
-                       {"title": fresh["title"], "icon_url": fresh["icon_url"]})
+            log_change(stored["id"], fresh["developer_id"], "listing_changed", old_value, new_value,
+                       run_id=run_id, developer_name=fresh["developer_name"],
+                       app_title=fresh["title"], package_name=package_name)
             update_fields["title"] = fresh["title"]
             update_fields["icon_url"] = fresh["icon_url"]
+            update_fields["icon_hash"] = new_icon_hash
+        elif new_icon_hash and not stored.get("icon_hash"):
+            # First time we're able to compute a hash (e.g. old record never had one) — store it silently, no event
             update_fields["icon_hash"] = new_icon_hash
 
         supabase.table("apps").update(update_fields).eq("id", stored["id"]).execute()
@@ -368,7 +417,9 @@ def main():
                     "package_name": package_name, "title": stored["title"], "developer_name": dev_name,
                 })
                 log_change(stored["id"], stored["developer_id"], "removed",
-                           {"title": stored["title"]}, None)
+                           {"title": stored["title"]}, None,
+                           run_id=run_id, developer_name=dev_name,
+                           app_title=stored["title"], package_name=package_name)
             supabase.table("apps").update({
                 "status": "removed",
                 "last_seen": datetime.now(timezone.utc).isoformat(),
@@ -424,9 +475,11 @@ def main():
                 "old_dev": old_dev.get("name", "unknown"), "new_dev": dev_name,
             })
             log_change(stored["id"], new_developer_id, "transferred",
-                       {"developer": old_dev.get("name", "unknown")}, {"developer": dev_name})
+                       {"developer": old_dev.get("name", "unknown")}, {"developer": dev_name},
+                       run_id=run_id, developer_name=dev_name,
+                       app_title=stored["title"], package_name=package_name)
 
-    send_digest(events)
+    send_digest(events, run_id)
     print("[info] Monitor cycle complete.")
 
 
