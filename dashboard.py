@@ -16,6 +16,7 @@ Three tabs:
 import os
 import re
 import urllib.parse
+from datetime import datetime, timezone, timedelta
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -28,6 +29,20 @@ SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY"))
 DISCORD_WEBHOOK_URL = st.secrets.get("DISCORD_WEBHOOK_URL", os.getenv("DISCORD_WEBHOOK_URL"))
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+PKT = timezone(timedelta(hours=5))
+
+
+def format_pkt(iso_str):
+    """Converts a stored UTC timestamp into a clean Pakistan-time display string."""
+    try:
+        dt = datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        pkt_dt = dt.astimezone(PKT)
+        return pkt_dt.strftime("%B %d, %Y — %I:%M %p PKT")
+    except Exception:
+        return iso_str
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -427,7 +442,8 @@ with tab3:
         }
 
         for run in runs:
-            with st.expander(f"Check run — {run['time']}  ({len(run['items'])} change(s))", expanded=False):
+            display_time = format_pkt(run['time'])
+            with st.expander(f"Check run — {display_time}  ({len(run['items'])} change(s))", expanded=False):
                 by_dev = {}
                 for c in run["items"]:
                     dev_name = c.get("developer_name") or "Unknown developer"
