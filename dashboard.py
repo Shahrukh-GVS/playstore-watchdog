@@ -229,7 +229,7 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab2, tab3 = st.tabs(["🔍 Trace", "📋 Watchlist", "🕒 Recent Activity"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Trace", "📋 Watchlist", "🕒 Recent Activity", "🆔 Manage Ad IDs"])
 
 # --- Tab 1: Trace ---
 with tab1:
@@ -326,3 +326,57 @@ with tab3:
                 "New": str(c.get("new_value") or "-"),
             })
         st.dataframe(table_data, use_container_width=True, hide_index=True)
+
+# --- Tab 4: Manage Ad IDs ---
+with tab4:
+    st.subheader("Add a new ad network ID")
+    st.caption("These are the IDs used to match against app-ads.txt during tracing (exact ID + DIRECT relationship required).")
+
+    with st.form("add_id_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            network_input = st.text_input("Network domain (e.g. google.com, applovin.com, facebook.com)")
+        with col2:
+            account_id_input = st.text_input("Account ID (e.g. pub-1234567890123456, or the raw ID)")
+        label_input = st.text_input("Label (optional note, e.g. 'Main AdMob account')")
+
+        submitted = st.form_submit_button("Add ID", type="primary")
+
+        if submitted:
+            if not network_input.strip() or not account_id_input.strip():
+                st.warning("Both network and account ID are required.")
+            else:
+                try:
+                    existing = supabase.table("ad_network_ids") \
+                        .select("id") \
+                        .eq("network", network_input.strip()) \
+                        .eq("account_id", account_id_input.strip()) \
+                        .execute()
+                    if existing.data:
+                        st.info("This network + ID combination is already saved.")
+                    else:
+                        supabase.table("ad_network_ids").insert({
+                            "network": network_input.strip(),
+                            "account_id": account_id_input.strip(),
+                            "label": label_input.strip() or None,
+                        }).execute()
+                        st.success(f"Added `{account_id_input.strip()}` under `{network_input.strip()}`.")
+                except Exception as e:
+                    st.error(f"Failed to add ID: {e}")
+
+    st.divider()
+    st.subheader("Currently tracked ad network IDs")
+
+    ids_data = supabase.table("ad_network_ids").select("*").order("id", desc=True).execute().data
+
+    if not ids_data:
+        st.info("No ad network IDs added yet.")
+    else:
+        for row in ids_data:
+            col1, col2, col3, col4 = st.columns([2, 3, 2, 1])
+            col1.write(row["network"])
+            col2.code(row["account_id"])
+            col3.write(row.get("label") or "-")
+            if col4.button("Delete", key=f"del_{row['id']}"):
+                supabase.table("ad_network_ids").delete().eq("id", row["id"]).execute()
+                st.rerun()
