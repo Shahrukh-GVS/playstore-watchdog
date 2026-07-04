@@ -426,11 +426,6 @@ with tab3:
             "removed": "🗑️", "listing_changed": "🎨",
         }
 
-        if "expanded_accounts" not in st.session_state:
-            st.session_state.expanded_accounts = set()
-        if "expanded_items" not in st.session_state:
-            st.session_state.expanded_items = set()
-
         for run in runs:
             with st.expander(f"Check run — {run['time']}  ({len(run['items'])} change(s))", expanded=False):
                 by_dev = {}
@@ -439,71 +434,45 @@ with tab3:
                     by_dev.setdefault(dev_name, []).append(c)
 
                 for dev_name, dev_items in by_dev.items():
-                    acc_key = f"{run['run_id']}::{dev_name}"
-                    acc_expanded = acc_key in st.session_state.expanded_accounts
+                    st.markdown(f"### {dev_name}")
 
-                    acol1, acol2 = st.columns([0.5, 9.5])
-                    with acol1:
-                        if st.button("▼" if acc_expanded else "▶", key=f"acc_btn_{acc_key}"):
-                            if acc_expanded:
-                                st.session_state.expanded_accounts.discard(acc_key)
-                            else:
-                                st.session_state.expanded_accounts.add(acc_key)
-                            st.rerun()
-                    with acol2:
-                        st.markdown(f"**{dev_name}**  \n*{len(dev_items)} change(s)*")
+                    for c in dev_items:
+                        package_name = c.get("package_name") or "-"
+                        app_title = c.get("app_title") or "unknown"
+                        link = f"https://play.google.com/store/apps/details?id={package_name}" if package_name != "-" else None
+                        icon = event_icons.get(c["event_type"], "•")
+                        event_type = c["event_type"]
 
-                    if acc_expanded:
-                        for c in dev_items:
-                            item_key = f"{acc_key}::{c['id']}"
-                            item_expanded = item_key in st.session_state.expanded_items
+                        if link:
+                            st.markdown(f"{icon} **[{app_title}]({link})** — {event_type}")
+                        else:
+                            st.markdown(f"{icon} **{app_title}** — {event_type}")
+                        st.caption(f"Package: `{package_name}`")
 
-                            package_name = c.get("package_name") or "-"
-                            app_title = c.get("app_title") or "unknown"
-                            link = f"https://play.google.com/store/apps/details?id={package_name}" if package_name != "-" else None
-                            icon = event_icons.get(c["event_type"], "•")
+                        old_val = c.get("old_value") or {}
+                        new_val = c.get("new_value") or {}
 
-                            _, icol1, icol2 = st.columns([0.5, 0.5, 8.5])
-                            with icol1:
-                                if st.button("▼" if item_expanded else "▶", key=f"item_btn_{item_key}"):
-                                    if item_expanded:
-                                        st.session_state.expanded_items.discard(item_key)
-                                    else:
-                                        st.session_state.expanded_items.add(item_key)
-                                    st.rerun()
-                            with icol2:
-                                if link:
-                                    st.markdown(f"{icon} **[{app_title}]({link})** — {c['event_type']}")
-                                else:
-                                    st.markdown(f"{icon} **{app_title}** — {c['event_type']}")
+                        if event_type == "listing_changed":
+                            lines = []
+                            if "title" in new_val:
+                                lines.append(f"Title: **{old_val.get('title')}** → **{new_val.get('title')}**")
+                            if "icon_url" in new_val:
+                                lines.append("Icon changed (see images below)")
+                            st.write("\n".join(lines) if lines else "No visible field changes recorded.")
+                            if "icon_url" in new_val:
+                                ic1, ic2 = st.columns(2)
+                                ic1.image(old_val.get("icon_url"), caption="Before", width=80)
+                                ic2.image(new_val.get("icon_url"), caption="After", width=80)
+                        elif event_type == "transferred":
+                            st.write(f"From **{old_val.get('developer')}** → **{new_val.get('developer')}**")
+                        elif event_type == "new_upload":
+                            st.write("New pre-registration listing appeared.")
+                        elif event_type == "transferred_in":
+                            st.write("Appeared with existing installs (moved from elsewhere, origin unknown).")
+                        elif event_type == "removed":
+                            st.write("No longer available under this developer / any watched account.")
 
-                            if item_expanded:
-                                st.caption(f"Package: `{package_name}`")
-                                old_val = c.get("old_value") or {}
-                                new_val = c.get("new_value") or {}
-                                event_type = c["event_type"]
-
-                                if event_type == "listing_changed":
-                                    lines = []
-                                    if "title" in new_val:
-                                        lines.append(f"Title: **{old_val.get('title')}** → **{new_val.get('title')}**")
-                                    if "icon_url" in new_val:
-                                        lines.append("Icon changed (see images below)")
-                                    st.write("\n".join(lines) if lines else "No visible field changes recorded.")
-                                    if "icon_url" in new_val:
-                                        ic1, ic2 = st.columns(2)
-                                        ic1.image(old_val.get("icon_url"), caption="Before", width=80)
-                                        ic2.image(new_val.get("icon_url"), caption="After", width=80)
-                                elif event_type == "transferred":
-                                    st.write(f"From **{old_val.get('developer')}** → **{new_val.get('developer')}**")
-                                elif event_type == "new_upload":
-                                    st.write("New pre-registration listing appeared.")
-                                elif event_type == "transferred_in":
-                                    st.write("Appeared with existing installs (moved from elsewhere, origin unknown).")
-                                elif event_type == "removed":
-                                    st.write("No longer available under this developer / any watched account.")
-
-                            st.markdown("---")
+                        st.markdown("---")
 
 # --- Tab 4: Manage Ad IDs ---
 with tab4:
