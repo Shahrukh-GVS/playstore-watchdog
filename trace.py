@@ -91,18 +91,34 @@ def extract_developer_info(soup: BeautifulSoup):
     return dev_name, dev_link
 
 
-def fetch_app_ads_txt(website: str):
+def fetch_app_ads_txt(website: str) -> str | None:
     website = website.rstrip("/")
     if not website.startswith("http"):
         website = "https://" + website
     url = f"{website}/app-ads.txt"
+
+    # Some sites block Python's requests library based on TLS fingerprint
+    # (even with a browser User-Agent) but allow real browsers/curl.
+    # curl_cffi impersonates an actual browser's TLS handshake to get past this.
+    try:
+        from curl_cffi import requests as cf_requests
+        resp = cf_requests.get(url, headers=HEADERS, timeout=15, impersonate="chrome124")
+        if resp.status_code == 200:
+            return resp.text
+        print(f"[warn] app-ads.txt fetch (curl_cffi) returned status {resp.status_code} for {url}")
+    except Exception as e:
+        print(f"[warn] curl_cffi fetch failed for {url}: {e}")
+
+    # Fallback to plain requests in case curl_cffi itself has an issue
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return None
-        return resp.text
-    except Exception:
-        return None
+        if resp.status_code == 200:
+            return resp.text
+        print(f"[warn] app-ads.txt fetch (requests) returned status {resp.status_code} for {url}")
+    except Exception as e:
+        print(f"[warn] requests fetch failed for {url}: {e}")
+
+    return None
 
 
 def parse_app_ads_lines(raw_text: str):

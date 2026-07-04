@@ -85,13 +85,24 @@ def fetch_app_ads_txt(website):
     website = website.rstrip("/")
     if not website.startswith("http"):
         website = "https://" + website
+    url = f"{website}/app-ads.txt"
+
     try:
-        resp = requests.get(f"{website}/app-ads.txt", headers=HEADERS, timeout=15)
-        if resp.status_code != 200:
-            return None
-        return resp.text
+        from curl_cffi import requests as cf_requests
+        resp = cf_requests.get(url, headers=HEADERS, timeout=15, impersonate="chrome124")
+        if resp.status_code == 200:
+            return resp.text
     except Exception:
-        return None
+        pass
+
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 200:
+            return resp.text
+    except Exception:
+        pass
+
+    return None
 
 
 def parse_app_ads_lines(raw_text):
