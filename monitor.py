@@ -89,19 +89,60 @@ def extract_install_info(soup):
     return False, None
 
 
-def clean_title(raw_title):
+def normalize_title(raw_title, developer_name=None):
     """
-    Play Store catalog listings often use an aria-label like
-    'Game Name, Rated 4.5 stars, Free, Contains ads' instead of just the title.
-    This strips everything after the first comma so title comparisons don't
-    false-positive just because a star rating changed.
+    Play Store catalog listings mash together the title, sometimes a duplicate
+    accessibility copy of the title, a star rating, and occasionally the
+    developer name — all with no separators, e.g.:
+      "Police Simulator: Real Chase Police Simulator: Real Chase2.9star"
+      "Miami Gangster Sim Mafia 3DBisma Apps Hub4.1star"
+    This strips all of that down to just the real title so comparisons don't
+    false-positive every time a rating shifts by a decimal point.
     """
     if not raw_title:
         return raw_title
-    return raw_title.split(",")[0].strip()
+    text = raw_title.strip()
+
+    text = re.sub(r'^(icon image|app icon)\s*', '', text, flags=re.IGNORECASE).strip()
+
+    # aria-label style: "Title, Rated 4.5 stars, Free, ..." -> keep only the first part
+    if "," in text:
+        text = text.split(",")[0].strip()
+
+    # Strip trailing rating patterns like "4.1star", "4.1 stars", repeatedly just in case
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r'\d+(?:\.\d+)?\s*(?:stars?|★)\s*$', '', text, flags=re.IGNORECASE).strip()
+
+    # Collapse an immediately duplicated title: "Title Title" -> "Title"
+    m = re.match(r'^(.+?)\s+\1$', text, flags=re.IGNORECASE)
+    if m:
+        text = m.group(1).strip()
+
+    # If the developer name got glued onto the end (no separator), strip it
+    if developer_name:
+        dev_norm = re.sub(r'\s+', '', developer_name).lower()
+        if dev_norm:
+            matched = 0
+            cut_index = len(text)
+            i = len(text) - 1
+            while i >= 0 and matched < len(dev_norm):
+                ch = text[i]
+                if ch != " ":
+                    if ch.lower() != dev_norm[len(dev_norm) - 1 - matched]:
+                        matched = -1
+                        break
+                    matched += 1
+                cut_index = i
+                i -= 1
+            if matched == len(dev_norm):
+                text = text[:cut_index].strip()
+
+    return text.strip()
 
 
-def fetch_developer_catalog(dev_link):
+def fetch_developer_catalog(dev_link, developer_name=None):
     try:
         resp = requests.get(dev_link, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
@@ -121,7 +162,7 @@ def fetch_developer_catalog(dev_link):
             continue
         seen.add(package_name)
         title = a.get("aria-label") or a.get_text(strip=True) or package_name
-        title = clean_title(title)
+        title = normalize_title(title, developer_name)
         img = a.find("img")
         icon_url = img["src"] if img and img.has_attr("src") else None
         apps.append({"package_name": package_name, "title": title, "icon_url": icon_url})
@@ -294,7 +335,7 @@ def main():
     fresh_map = {}
 
     for dev_id, dev in developers.items():
-        catalog = fetch_developer_catalog(dev["developer_url"])
+        catalog = fetch_developer_catalog(dev["developer_url"], developer_name=dev["name"])
         supabase.table("developers").update({
             "last_checked": datetime.now(timezone.utc).isoformat()
         }).eq("id", dev_id).execute()
@@ -449,7 +490,7 @@ def main():
                 new_developer_id = existing_dev.data[0]["id"]
             else:
                 new_developer_id = upsert_developer(dev_name, dev_link)
-                new_catalog = fetch_developer_catalog(dev_link)
+                new_catalog = fetch_developer_catalog(dev_link, developer_name=dev_name)
                 for a in new_catalog:
                     if a["package_name"] == package_name:
                         continue

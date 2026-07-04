@@ -169,7 +169,41 @@ def find_match(ads_lines, known_ids):
     return None
 
 
-def fetch_developer_catalog(dev_link: str):
+def normalize_title(raw_title: str, developer_name: str = None) -> str:
+    if not raw_title:
+        return raw_title
+    text = raw_title.strip()
+    text = re.sub(r'^(icon image|app icon)\s*', '', text, flags=re.IGNORECASE).strip()
+    if "," in text:
+        text = text.split(",")[0].strip()
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r'\d+(?:\.\d+)?\s*(?:stars?|★)\s*$', '', text, flags=re.IGNORECASE).strip()
+    m = re.match(r'^(.+?)\s+\1$', text, flags=re.IGNORECASE)
+    if m:
+        text = m.group(1).strip()
+    if developer_name:
+        dev_norm = re.sub(r'\s+', '', developer_name).lower()
+        if dev_norm:
+            matched = 0
+            cut_index = len(text)
+            i = len(text) - 1
+            while i >= 0 and matched < len(dev_norm):
+                ch = text[i]
+                if ch != " ":
+                    if ch.lower() != dev_norm[len(dev_norm) - 1 - matched]:
+                        matched = -1
+                        break
+                    matched += 1
+                cut_index = i
+                i -= 1
+            if matched == len(dev_norm):
+                text = text[:cut_index].strip()
+    return text.strip()
+
+
+def fetch_developer_catalog(dev_link: str, developer_name: str = None):
     """Returns list of dicts: package_name, title, icon_url, installs_bracket-ish, is_pre_registration"""
     resp = requests.get(dev_link, headers=HEADERS, timeout=15)
     if resp.status_code != 200:
@@ -190,6 +224,7 @@ def fetch_developer_catalog(dev_link: str):
         seen_packages.add(package_name)
 
         title = a.get("aria-label") or a.get_text(strip=True) or package_name
+        title = normalize_title(title, developer_name)
         img = a.find("img")
         icon_url = img["src"] if img and img.has_attr("src") else None
 
@@ -294,7 +329,7 @@ def main():
     print(f"[info] Developer: {dev_name} — {dev_link}")
     developer_id = upsert_developer(dev_name, dev_link)
 
-    catalog = fetch_developer_catalog(dev_link)
+    catalog = fetch_developer_catalog(dev_link, developer_name=dev_name)
     inserted = insert_apps(developer_id, catalog)
 
     msg = (f"✅ **Match confirmed — developer added to watchlist**\n"

@@ -154,7 +154,41 @@ def find_match(ads_lines, known_ids):
     return None
 
 
-def fetch_developer_catalog(dev_link):
+def normalize_title(raw_title, developer_name=None):
+    if not raw_title:
+        return raw_title
+    text = raw_title.strip()
+    text = re.sub(r'^(icon image|app icon)\s*', '', text, flags=re.IGNORECASE).strip()
+    if "," in text:
+        text = text.split(",")[0].strip()
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r'\d+(?:\.\d+)?\s*(?:stars?|★)\s*$', '', text, flags=re.IGNORECASE).strip()
+    m = re.match(r'^(.+?)\s+\1$', text, flags=re.IGNORECASE)
+    if m:
+        text = m.group(1).strip()
+    if developer_name:
+        dev_norm = re.sub(r'\s+', '', developer_name).lower()
+        if dev_norm:
+            matched = 0
+            cut_index = len(text)
+            i = len(text) - 1
+            while i >= 0 and matched < len(dev_norm):
+                ch = text[i]
+                if ch != " ":
+                    if ch.lower() != dev_norm[len(dev_norm) - 1 - matched]:
+                        matched = -1
+                        break
+                    matched += 1
+                cut_index = i
+                i -= 1
+            if matched == len(dev_norm):
+                text = text[:cut_index].strip()
+    return text.strip()
+
+
+def fetch_developer_catalog(dev_link, developer_name=None):
     resp = requests.get(dev_link, headers=HEADERS, timeout=15)
     if resp.status_code != 200:
         return []
@@ -169,6 +203,7 @@ def fetch_developer_catalog(dev_link):
             continue
         seen.add(package_name)
         title = a.get("aria-label") or a.get_text(strip=True) or package_name
+        title = normalize_title(title, developer_name)
         img = a.find("img")
         icon_url = img["src"] if img and img.has_attr("src") else None
         apps.append({"package_name": package_name, "title": title, "icon_url": icon_url})
@@ -252,7 +287,7 @@ def run_trace(url):
         return {"status": "error", "message": "Match found but could not extract developer page link."}
 
     developer_id = upsert_developer(dev_name, dev_link)
-    catalog = fetch_developer_catalog(dev_link)
+    catalog = fetch_developer_catalog(dev_link, developer_name=dev_name)
     inserted = insert_apps(developer_id, catalog)
 
     msg = (f"✅ **Match confirmed — developer added to watchlist**\n"
@@ -393,48 +428,54 @@ with tab3:
 
         for run in runs:
             with st.expander(f"Check run — {run['time']}  ({len(run['items'])} change(s))", expanded=False):
+                # Group this run's items by developer
+                by_dev = {}
                 for c in run["items"]:
-                    package_name = c.get("package_name") or "-"
-                    app_title = c.get("app_title") or "unknown"
-                    dev_name = c.get("developer_name") or "unknown"
-                    link = f"https://play.google.com/store/apps/details?id={package_name}" if package_name != "-" else None
-                    icon = event_icons.get(c["event_type"], "•")
+                    dev_name = c.get("developer_name") or "Unknown developer"
+                    by_dev.setdefault(dev_name, []).append(c)
 
-                    col1, col2 = st.columns([3, 5])
-                    with col1:
-                        if link:
-                            st.markdown(f"{icon} **[{app_title}]({link})**")
-                        else:
-                            st.markdown(f"{icon} **{app_title}**")
-                        st.caption(f"Developer: {dev_name} | Package: `{package_name}`")
+                for dev_name, dev_items in by_dev.items():
+                    st.markdown(f"#### {dev_name}  \n*{len(dev_items)} change(s)*")
+                    for c in dev_items:
+                            package_name = c.get("package_name") or "-"
+                            app_title = c.get("app_title") or "unknown"
+                            link = f"https://play.google.com/store/apps/details?id={package_name}" if package_name != "-" else None
+                            icon = event_icons.get(c["event_type"], "•")
 
-                    with col2:
-                        old_val = c.get("old_value") or {}
-                        new_val = c.get("new_value") or {}
-                        event_type = c["event_type"]
+                            col1, col2 = st.columns([3, 5])
+                            with col1:
+                                if link:
+                                    st.markdown(f"{icon} **[{app_title}]({link})**")
+                                else:
+                                    st.markdown(f"{icon} **{app_title}**")
+                                st.caption(f"Package: `{package_name}`")
 
-                        if event_type == "listing_changed":
-                            # Only show fields that actually changed
-                            lines = []
-                            if "title" in new_val:
-                                lines.append(f"Title: **{old_val.get('title')}** → **{new_val.get('title')}**")
-                            if "icon_url" in new_val:
-                                lines.append("Icon changed:")
-                            st.write("\n".join(lines) if lines else "No visible field changes recorded.")
-                            if "icon_url" in new_val:
-                                ic1, ic2 = st.columns(2)
-                                ic1.image(old_val.get("icon_url"), caption="Before", width=80)
-                                ic2.image(new_val.get("icon_url"), caption="After", width=80)
-                        elif event_type == "transferred":
-                            st.write(f"From **{old_val.get('developer')}** → **{new_val.get('developer')}**")
-                        elif event_type == "new_upload":
-                            st.write("New pre-registration listing appeared.")
-                        elif event_type == "transferred_in":
-                            st.write("Appeared with existing installs (moved from elsewhere, origin unknown).")
-                        elif event_type == "removed":
-                            st.write("No longer available under this developer / any watched account.")
+                            with col2:
+                                old_val = c.get("old_value") or {}
+                                new_val = c.get("new_value") or {}
+                                event_type = c["event_type"]
 
-                    st.divider()
+                                if event_type == "listing_changed":
+                                    lines = []
+                                    if "title" in new_val:
+                                        lines.append(f"Title: **{old_val.get('title')}** → **{new_val.get('title')}**")
+                                    if "icon_url" in new_val:
+                                        lines.append("Icon changed (see images below)")
+                                    st.write("\n".join(lines) if lines else "No visible field changes recorded.")
+                                    if "icon_url" in new_val:
+                                        ic1, ic2 = st.columns(2)
+                                        ic1.image(old_val.get("icon_url"), caption="Before", width=80)
+                                        ic2.image(new_val.get("icon_url"), caption="After", width=80)
+                                elif event_type == "transferred":
+                                    st.write(f"From **{old_val.get('developer')}** → **{new_val.get('developer')}**")
+                                elif event_type == "new_upload":
+                                    st.write("New pre-registration listing appeared.")
+                                elif event_type == "transferred_in":
+                                    st.write("Appeared with existing installs (moved from elsewhere, origin unknown).")
+                                elif event_type == "removed":
+                                    st.write("No longer available under this developer / any watched account.")
+
+                            st.divider()
 
 # --- Tab 4: Manage Ad IDs ---
 with tab4:
