@@ -256,26 +256,40 @@ tab1, tab2, tab3, tab4 = st.tabs(["🔍 Trace", "📋 Watchlist", "🕒 Recent A
 
 # --- Tab 1: Trace ---
 with tab1:
-    st.subheader("Trace a new game")
-    url_input = st.text_input("Paste the Play Store game URL")
-    if st.button("Run Trace", type="primary"):
-        if not url_input.strip():
-            st.warning("Please paste a URL first.")
-        else:
-            with st.spinner("Tracing..."):
-                result = run_trace(url_input.strip())
+    st.subheader("Trace new games")
+    st.caption("Paste one URL, or multiple separated by commas.")
+    url_input = st.text_area("Paste Play Store game URL(s)", height=100)
 
-            if result["status"] == "match":
-                st.success(
-                    f"{result['message']}\n\n"
-                    f"**Matched ID:** `{result['matched_id']}` on `{result['domain']}` (DIRECT)"
-                )
-            elif result["status"] == "no_match":
-                st.info(result["message"])
-            elif result["status"] == "warn":
-                st.warning(result["message"])
-            else:
-                st.error(result["message"])
+    if st.button("Run Trace", type="primary"):
+        raw_urls = [u.strip() for u in url_input.split(",") if u.strip()]
+
+        if not raw_urls:
+            st.warning("Please paste at least one URL first.")
+        else:
+            st.write(f"Tracing {len(raw_urls)} URL(s)...")
+            progress = st.progress(0)
+
+            for i, single_url in enumerate(raw_urls):
+                with st.spinner(f"Tracing {single_url}..."):
+                    result = run_trace(single_url)
+
+                label = single_url if len(single_url) < 60 else single_url[:57] + "..."
+
+                if result["status"] == "match":
+                    st.success(
+                        f"**{label}**\n\n{result['message']}\n\n"
+                        f"**Matched ID:** `{result['matched_id']}` on `{result['domain']}` (DIRECT)"
+                    )
+                elif result["status"] == "no_match":
+                    st.info(f"**{label}**\n\n{result['message']}")
+                elif result["status"] == "warn":
+                    st.warning(f"**{label}**\n\n{result['message']}")
+                else:
+                    st.error(f"**{label}**\n\n{result['message']}")
+
+                progress.progress((i + 1) / len(raw_urls))
+
+            st.success(f"Done — traced {len(raw_urls)} URL(s).")
 
 # --- Tab 2: Watchlist ---
 with tab2:
