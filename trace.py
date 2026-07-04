@@ -16,6 +16,7 @@ It will prompt you to paste a Play Store game URL. It then:
 import os
 import re
 import sys
+import urllib.parse
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -58,6 +59,16 @@ def fetch_app_page(package_name: str):
     return BeautifulSoup(resp.text, "html.parser")
 
 
+def unwrap_google_redirect(url: str) -> str:
+    """Play Store often wraps external links as https://www.google.com/url?q=REAL_URL&..."""
+    if "google.com/url" in url:
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "q" in qs and qs["q"]:
+            return qs["q"][0]
+    return url
+
+
 def extract_website(soup: BeautifulSoup) -> str | None:
     # Play Store "Website" link text varies (sometimes just "Website", sometimes "Visit website")
     for a in soup.find_all("a", href=True):
@@ -65,7 +76,7 @@ def extract_website(soup: BeautifulSoup) -> str | None:
         text = (a.get_text() or "").strip().lower()
         href = a["href"]
         if ("website" in label or "website" in text) and href.startswith("http"):
-            return href
+            return unwrap_google_redirect(href)
     return None
 
 

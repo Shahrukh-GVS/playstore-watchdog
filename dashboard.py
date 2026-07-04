@@ -15,6 +15,7 @@ Three tabs:
 
 import os
 import re
+import urllib.parse
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -55,9 +56,20 @@ def extract_website(soup):
     for a in soup.find_all("a", href=True):
         label = (a.get("aria-label") or "").lower()
         text = (a.get_text() or "").strip().lower()
-        if "website" in label or text == "visit website":
-            return a["href"]
+        href = a["href"]
+        if ("website" in label or "website" in text) and href.startswith("http"):
+            return unwrap_google_redirect(href)
     return None
+
+
+def unwrap_google_redirect(url):
+    """Play Store often wraps external links as https://www.google.com/url?q=REAL_URL&..."""
+    if "google.com/url" in url:
+        parsed = urllib.parse.urlparse(url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        if "q" in qs and qs["q"]:
+            return qs["q"][0]
+    return url
 
 
 def extract_developer_info(soup):
