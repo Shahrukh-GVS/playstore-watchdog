@@ -238,15 +238,28 @@ def upsert_developer(dev_name, dev_link):
     return result.data[0]["id"]
 
 
+def extract_canonical_title(soup):
+    if soup and soup.title and soup.title.string:
+        t = soup.title.string.strip()
+        t = re.sub(r'\s*-\s*Apps on Google Play\s*$', '', t, flags=re.IGNORECASE)
+        return t.strip()
+    return None
+
+
 def insert_apps(developer_id, apps):
     inserted = 0
     for app in apps:
         existing = supabase.table("apps").select("id").eq("package_name", app["package_name"]).execute()
         if existing.data:
             continue
+
+        detail_soup = fetch_app_page(app["package_name"])
+        canonical_title = extract_canonical_title(detail_soup) if detail_soup else None
+        final_title = canonical_title or app["title"]
+
         supabase.table("apps").insert({
             "package_name": app["package_name"], "developer_id": developer_id,
-            "title": app["title"], "icon_url": app["icon_url"], "status": "active",
+            "title": final_title, "icon_url": app["icon_url"], "status": "active",
         }).execute()
         inserted += 1
     return inserted
