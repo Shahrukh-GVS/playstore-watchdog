@@ -512,14 +512,64 @@ with tab_spy:
 with tab2:
     st.subheader("Watched developers")
 
-    if st.button("Refresh"):
+    col_refresh, col_recheck = st.columns(2)
+    if col_refresh.button("Refresh"):
         st.rerun()
+
+    recheck_clicked = col_recheck.button("🔁 Recheck all accounts against current Ad IDs", type="primary")
 
     if "confirm_delete_dev" not in st.session_state:
         st.session_state.confirm_delete_dev = None
 
     developers = supabase.table("developers").select("*").order("first_seen", desc=True).execute().data
     apps_all = supabase.table("apps").select("*").execute().data
+
+    if recheck_clicked:
+        known_ids = get_known_ids()
+        no_longer_matching = []
+        still_matching = []
+        progress = st.progress(0)
+        status_text = st.empty()
+
+        for i, dev in enumerate(developers):
+            status_text.write(f"Checking {dev['name']}...")
+            dev_apps_list = [a for a in apps_all if a["developer_id"] == dev["id"] and a["status"] == "active"]
+            found = False
+
+            for app in dev_apps_list:
+                soup = fetch_app_page(app["package_name"])
+                if not soup:
+                    continue
+                website = extract_website(soup)
+                if not website:
+                    continue
+                ads_txt = fetch_app_ads_txt(website)
+                if not ads_txt:
+                    continue
+                lines = parse_app_ads_lines(ads_txt)
+                if find_match(lines, known_ids):
+                    found = True
+                    break
+
+            if found:
+                still_matching.append(dev["name"])
+            else:
+                no_longer_matching.append(dev["name"])
+
+            progress.progress((i + 1) / len(developers))
+
+        status_text.empty()
+
+        if no_longer_matching:
+            st.warning(
+                f"⚠️ **{len(no_longer_matching)} account(s) no longer match any current Ad ID** "
+                f"(likely because you removed the ID they were originally matched on):\n\n"
+                + "\n".join(f"- {n}" for n in no_longer_matching)
+                + "\n\nThese are still in your watchlist — go to the account below and use "
+                  "**Delete this account** if you want to remove them."
+            )
+        else:
+            st.success(f"✅ All {len(still_matching)} account(s) still match at least one current Ad ID.")
 
     if not developers:
         st.info("No developers tracked yet. Use the Trace tab to add one.")
