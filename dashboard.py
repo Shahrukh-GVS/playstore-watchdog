@@ -387,8 +387,8 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab2, tab3, tab4 = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "📋 Watchlist", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
+tab1, tab_spy, tab2, tab_short, tab3, tab4 = st.tabs(
+    ["🔍 Trace", "📈 AppStore Spy", "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
 )
 
 # --- Tab 1: Trace ---
@@ -630,6 +630,7 @@ with tab2:
 
             if dev_apps:
                 table_data = [{
+                    "Shortlisted": bool(a.get("shortlisted", False)),
                     "Icon": a.get("icon_url"),
                     "Title": a["title"],
                     "Package": a["package_name"],
@@ -638,12 +639,24 @@ with tab2:
                     "Pre-registration": "Yes" if a.get("is_pre_registration") else "No",
                 } for a in dev_apps]
 
-                st.dataframe(
+                edited = st.data_editor(
                     table_data,
-                    column_config={"Icon": st.column_config.ImageColumn("Icon", width="small")},
+                    column_config={
+                        "Shortlisted": st.column_config.CheckboxColumn("⭐"),
+                        "Icon": st.column_config.ImageColumn("Icon", width="small"),
+                    },
+                    disabled=["Icon", "Title", "Package", "Status", "Installs", "Pre-registration"],
                     use_container_width=True,
                     hide_index=True,
+                    key=f"editor_{dev['id']}",
                 )
+
+                for i, row in enumerate(edited):
+                    original_app = dev_apps[i]
+                    if row["Shortlisted"] != bool(original_app.get("shortlisted", False)):
+                        supabase.table("apps").update(
+                            {"shortlisted": row["Shortlisted"]}
+                        ).eq("id", original_app["id"]).execute()
             else:
                 st.write("No apps recorded yet.")
 
@@ -669,6 +682,44 @@ with tab2:
                 if st.button("🗑️ Delete this account", key=f"delete_{dev['id']}"):
                     st.session_state.confirm_delete_dev = dev["id"]
                     st.rerun()
+
+# --- Tab: Shortlisted ---
+with tab_short:
+    st.subheader("Shortlisted games")
+    st.caption("Games you've checked off in the Watchlist tab. Uncheck here to remove from this list (they stay in Watchlist either way).")
+
+    shortlisted_apps = supabase.table("apps").select("*").eq("shortlisted", True).execute().data
+
+    if not shortlisted_apps:
+        st.info("No games shortlisted yet. Go to the Watchlist tab and check the ⭐ box next to any game.")
+    else:
+        developers_lookup = {d["id"]: d["name"] for d in supabase.table("developers").select("id, name").execute().data}
+
+        short_table = [{
+            "Shortlisted": True,
+            "Icon": a.get("icon_url"),
+            "Title": a["title"],
+            "Developer": developers_lookup.get(a["developer_id"], "unknown"),
+            "Package": a["package_name"],
+            "Status": a["status"],
+        } for a in shortlisted_apps]
+
+        edited_short = st.data_editor(
+            short_table,
+            column_config={
+                "Shortlisted": st.column_config.CheckboxColumn("⭐"),
+                "Icon": st.column_config.ImageColumn("Icon", width="small"),
+            },
+            disabled=["Icon", "Title", "Developer", "Package", "Status"],
+            use_container_width=True,
+            hide_index=True,
+            key="shortlist_editor",
+        )
+
+        for i, row in enumerate(edited_short):
+            if not row["Shortlisted"]:
+                supabase.table("apps").update({"shortlisted": False}).eq("id", shortlisted_apps[i]["id"]).execute()
+                st.rerun()
 
 # --- Tab 3: Recent Activity ---
 with tab3:
