@@ -319,12 +319,45 @@ def discover_games(days_back, limit=100, country="US"):
         return data.get("data", []), None
     except Exception as e:
         return None, f"Request failed: {e}"
-    if not DISCORD_WEBHOOK_URL:
-        return
+
+
+def discover_games_by_name(name, days_back, limit=100, country="US"):
+    """Searches AppstoreSpy for games matching a name, within a release-date window."""
+    if not APPSTORESPY_API_KEY:
+        return None, "No AppstoreSpy API key configured."
+
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days_back)
+
+    body = {
+        "limit": limit,
+        "page": 1,
+        "sort": "-downloads_daily",
+        "fields": ["id", "name", "developer_id", "developer_name", "url", "icon", "downloads_daily"],
+        "country": country,
+        "filter": {
+            "name": name,
+            "category_type": "GAME",
+            "release_date": {"gte": start.isoformat(), "lte": today.isoformat()},
+        },
+    }
+    headers = {
+        "accept": "application/json",
+        "API-KEY": APPSTORESPY_API_KEY,
+        "Content-Type": "application/json",
+    }
+
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10)
-    except Exception:
-        pass
+        resp = requests.post(
+            "https://api.appstorespy.com/v1/play/apps/query",
+            json=body, headers=headers, timeout=30,
+        )
+        if resp.status_code != 200:
+            return None, f"API returned status {resp.status_code}: {resp.text[:300]}"
+        data = resp.json()
+        return data.get("data", []), None
+    except Exception as e:
+        return None, f"Request failed: {e}"
 
 
 def run_trace(url):
@@ -387,8 +420,8 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab2, tab_short, tab3, tab4 = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
+tab1, tab_spy, tab_search, tab2, tab_short, tab3, tab4 = st.tabs(
+    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
 )
 
 # --- Tab 1: Trace ---
@@ -522,6 +555,95 @@ with tab_spy:
             )
             if match_details:
                 st.write("\n".join(match_details))
+
+# --- Tab: Search by Name ---
+with tab_search:
+    st.subheader("Search games by name (via AppstoreSpy)")
+    st.caption("Search for a specific game name on Google Play, filtered by release date window.")
+
+    search_name = st.text_input("Game name", key="search_name_input", placeholder="e.g. Geometry Dash")
+    days_option = st.radio("Release date window", ["7 days", "30 days", "90 days"], horizontal=True, key="search_days_option")
+    days_map = {"7 days": 7, "30 days": 30, "90 days": 90}
+
+    if "search_results" not in st.session_state:
+        st.session_state.search_results = None
+
+    if st.button("🔎 Search", type="primary"):
+        if not search_name.strip():
+            st.warning("Please enter a game name.")
+        else:
+            with st.spinner(f"Searching for '{search_name}'..."):
+                results, error = discover_games_by_name(search_name.strip(), days_map[days_option], limit=100)
+
+            if error:
+                st.error(error)
+                st.session_state.search_results = None
+            elif not results:
+                st.info("No games found matching that search.")
+                st.session_state.search_results = None
+            else:
+                st.session_state.search_results = results
+
+    if st.session_state.search_results:
+        results = st.session_state.search_results
+        st.markdown(f"### Results — {len(results)} game(s) found")
+
+        table_data = [{
+            "Icon": g.get("icon"),
+            "Name": g.get("name"),
+            "Developer": g.get("developer_name"),
+            "Daily Installs": g.get("downloads_daily"),
+            "Link": g.get("url"),
+        } for g in results]
+
+        st.dataframe(
+            table_data,
+            column_config={
+                "Icon": st.column_config.ImageColumn("Icon", width="small"),
+                "Link": st.column_config.LinkColumn("Link", display_text="Open"),
+            },
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("---")
+        st.write(f"Ready to check all {len(results)} games for app-ads.txt matches?")
+
+        if st.button("🔎 Trace these games", type="primary", key="trace_search_results"):
+            progress = st.progress(0)
+            summary = {"match": 0, "already_exists": 0, "no_match": 0, "other": 0}
+            match_details = []
+
+            for i, game in enumerate(results):
+                url = game.get("url")
+                if not url:
+                    summary["other"] += 1
+                    progress.progress((i + 1) / len(results))
+                    continue
+
+                result = run_trace(url)
+                if result["status"] == "match":
+                    summary["match"] += 1
+                    match_details.append(f"✅ {game.get('name', 'unknown')} — new developer added")
+                elif result["status"] == "already_exists":
+                    summary["already_exists"] += 1
+                elif result["status"] == "no_match":
+                    summary["no_match"] += 1
+                else:
+                    summary["other"] += 1
+
+                progress.progress((i + 1) / len(results))
+
+            st.success(
+                f"**Tracing complete:**\n\n"
+                f"- New matches added: **{summary['match']}**\n"
+                f"- Already in watchlist: **{summary['already_exists']}**\n"
+                f"- No match: **{summary['no_match']}**\n"
+                f"- Skipped/errors: **{summary['other']}**"
+            )
+            if match_details:
+                st.write("\n".join(match_details))
+
 with tab2:
     st.subheader("Watched developers")
 
