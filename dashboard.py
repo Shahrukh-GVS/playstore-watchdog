@@ -431,12 +431,13 @@ with tab_spy:
     if "spy_window" not in st.session_state:
         st.session_state.spy_window = None
 
-    col1, col2 = st.columns(2)
-    fetch_30 = col1.button("📅 Top 100 (30 days)", use_container_width=True, type="primary")
-    fetch_90 = col2.button("📅 Top 100 (90 days)", use_container_width=True, type="primary")
+    col1, col2, col3 = st.columns(3)
+    fetch_7 = col1.button("📅 Top 100 (7 days)", use_container_width=True, type="primary")
+    fetch_30 = col2.button("📅 Top 100 (30 days)", use_container_width=True, type="primary")
+    fetch_90 = col3.button("📅 Top 100 (90 days)", use_container_width=True, type="primary")
 
-    if fetch_30 or fetch_90:
-        days_back = 30 if fetch_30 else 90
+    if fetch_7 or fetch_30 or fetch_90:
+        days_back = 7 if fetch_7 else (30 if fetch_30 else 90)
         with st.spinner(f"Fetching top 100 games from the last {days_back} days..."):
             games, error = discover_games(days_back=days_back, limit=100)
 
