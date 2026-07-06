@@ -527,6 +527,7 @@ with tab2:
     if recheck_clicked:
         known_ids = get_known_ids()
         no_longer_matching = []
+        no_longer_matching_ids = []
         still_matching = []
         progress = st.progress(0)
         status_text = st.empty()
@@ -555,21 +556,52 @@ with tab2:
                 still_matching.append(dev["name"])
             else:
                 no_longer_matching.append(dev["name"])
+                no_longer_matching_ids.append(dev["id"])
 
             progress.progress((i + 1) / len(developers))
 
         status_text.empty()
+        st.session_state.flagged_dev_ids = no_longer_matching_ids
+        st.session_state.flagged_dev_names = no_longer_matching
 
         if no_longer_matching:
             st.warning(
                 f"⚠️ **{len(no_longer_matching)} account(s) no longer match any current Ad ID** "
                 f"(likely because you removed the ID they were originally matched on):\n\n"
                 + "\n".join(f"- {n}" for n in no_longer_matching)
-                + "\n\nThese are still in your watchlist — go to the account below and use "
-                  "**Delete this account** if you want to remove them."
             )
         else:
             st.success(f"✅ All {len(still_matching)} account(s) still match at least one current Ad ID.")
+
+    if st.session_state.get("flagged_dev_ids"):
+        st.markdown("---")
+        st.write(f"**{len(st.session_state.flagged_dev_ids)} flagged account(s) ready to remove:**")
+        for n in st.session_state.flagged_dev_names:
+            st.write(f"- {n}")
+
+        if st.session_state.get("confirm_bulk_delete"):
+            st.warning("Are you sure? This will permanently delete all flagged accounts and their apps/history.")
+            bcol1, bcol2 = st.columns(2)
+            if bcol1.button("Yes, delete all flagged accounts", type="primary"):
+                for dev_id in st.session_state.flagged_dev_ids:
+                    app_ids = [a["id"] for a in apps_all if a["developer_id"] == dev_id]
+                    if app_ids:
+                        supabase.table("change_log").delete().in_("app_id", app_ids).execute()
+                    supabase.table("change_log").delete().eq("developer_id", dev_id).execute()
+                    supabase.table("apps").delete().eq("developer_id", dev_id).execute()
+                    supabase.table("developers").delete().eq("id", dev_id).execute()
+                st.success(f"Deleted {len(st.session_state.flagged_dev_ids)} account(s).")
+                st.session_state.flagged_dev_ids = None
+                st.session_state.flagged_dev_names = None
+                st.session_state.confirm_bulk_delete = False
+                st.rerun()
+            if bcol2.button("Cancel"):
+                st.session_state.confirm_bulk_delete = False
+                st.rerun()
+        else:
+            if st.button("🗑️ Delete all flagged accounts", type="primary"):
+                st.session_state.confirm_bulk_delete = True
+                st.rerun()
 
     if not developers:
         st.info("No developers tracked yet. Use the Trace tab to add one.")
