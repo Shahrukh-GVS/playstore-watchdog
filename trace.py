@@ -262,6 +262,17 @@ def extract_canonical_title(soup) -> str | None:
     return None
 
 
+def extract_install_info(soup):
+    """Returns (is_pre_registration: bool, installs_bracket: str|None)"""
+    page_text = soup.get_text(" ", strip=True)
+    if re.search(r"pre-?register", page_text, re.IGNORECASE):
+        return True, None
+    m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
+    if m:
+        return False, m.group(1)
+    return False, None
+
+
 def insert_apps(developer_id: int, apps: list):
     inserted_count = 0
     for app in apps:
@@ -275,6 +286,7 @@ def insert_apps(developer_id: int, apps: list):
         detail_soup = fetch_app_page(app["package_name"])
         canonical_title = extract_canonical_title(detail_soup) if detail_soup else None
         final_title = canonical_title or app["title"]
+        is_pre_reg, installs = extract_install_info(detail_soup) if detail_soup else (False, None)
 
         supabase.table("apps").insert({
             "package_name": app["package_name"],
@@ -282,6 +294,8 @@ def insert_apps(developer_id: int, apps: list):
             "title": final_title,
             "icon_url": app["icon_url"],
             "status": "active",
+            "is_pre_registration": is_pre_reg,
+            "installs_bracket": installs,
         }).execute()
         inserted_count += 1
     return inserted_count

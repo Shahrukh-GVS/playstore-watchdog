@@ -51,31 +51,59 @@ def extract_canonical_title(soup):
     return None
 
 
+def extract_install_info(soup):
+    page_text = soup.get_text(" ", strip=True)
+    if re.search(r"pre-?register", page_text, re.IGNORECASE):
+        return True, None
+    m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
+    if m:
+        return False, m.group(1)
+    return False, None
+
+
 def main():
     apps = supabase.table("apps").select("*").eq("status", "active").execute().data
-    print(f"[info] Backfilling titles for {len(apps)} active apps...")
+    print(f"[info] Backfilling titles and pre-registration status for {len(apps)} active apps...")
 
-    fixed = 0
+    fixed_title = 0
+    fixed_prereg = 0
     failed = 0
 
     for i, app in enumerate(apps):
         soup = fetch_app_page(app["package_name"])
-        canonical_title = extract_canonical_title(soup) if soup else None
 
-        if canonical_title and canonical_title != app["title"]:
-            supabase.table("apps").update({"title": canonical_title}).eq("id", app["id"]).execute()
-            print(f"[fixed] {app['package_name']}: '{app['title']}' -> '{canonical_title}'")
-            fixed += 1
-        elif not canonical_title:
-            print(f"[warn] Could not fetch canonical title for {app['package_name']}")
+        if not soup:
+            print(f"[warn] Could not fetch page for {app['package_name']}")
             failed += 1
+            time.sleep(0.5)
+            continue
 
-        time.sleep(0.5)  # be gentle on Play Store
+        canonical_title = extract_canonical_title(soup)
+        is_pre_reg, installs = extract_install_info(soup)
+
+        update_fields = {}
+        if canonical_title and canonical_title != app["title"]:
+            update_fields["title"] = canonical_title
+        if is_pre_reg != app.get("is_pre_registration", False):
+            update_fields["is_pre_registration"] = is_pre_reg
+        if installs and installs != app.get("installs_bracket"):
+            update_fields["installs_bracket"] = installs
+
+        if update_fields:
+            supabase.table("apps").update(update_fields).eq("id", app["id"]).execute()
+            changes = ", ".join(f"{k}={v}" for k, v in update_fields.items())
+            print(f"[fixed] {app['package_name']}: {changes}")
+            if "title" in update_fields:
+                fixed_title += 1
+            if "is_pre_registration" in update_fields:
+                fixed_prereg += 1
+
+        time.sleep(0.5)
 
         if (i + 1) % 20 == 0:
             print(f"[info] Progress: {i + 1}/{len(apps)}")
 
-    print(f"[info] Done. Fixed: {fixed}, Failed to fetch: {failed}, Unchanged: {len(apps) - fixed - failed}")
+    print(f"[info] Done. Titles fixed: {fixed_title}, Pre-reg status fixed: {fixed_prereg}, Failed to fetch: {failed}")
 
 
 if __name__ == "__main__":
