@@ -277,7 +277,7 @@ def insert_apps(developer_id, apps):
     return inserted
 
 
-def discover_games(days_back, limit=100, country="US", pre_register_only=False):
+def discover_games(days_back, limit=100, country="US"):
     """
     Calls AppstoreSpy's filtered search for newly released/updated games,
     sorted by daily installs (matches: Google Play, Published, Game,
@@ -290,19 +290,17 @@ def discover_games(days_back, limit=100, country="US", pre_register_only=False):
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=days_back)
 
-    filter_body = {
-        "category_type": "GAME",
-        "release_date": {"gte": start.isoformat(), "lte": today.isoformat()},
-    }
-    filter_body["published"] = False if pre_register_only else True
-
     body = {
         "limit": limit,
         "page": 1,
         "sort": "-downloads_daily",
         "fields": ["id", "name", "developer_id", "developer_name", "url", "icon", "downloads_daily"],
         "country": country,
-        "filter": filter_body,
+        "filter": {
+            "published": True,
+            "category_type": "GAME",
+            "release_date": {"gte": start.isoformat(), "lte": today.isoformat()},
+        },
     }
     headers = {
         "accept": "application/json",
@@ -323,7 +321,7 @@ def discover_games(days_back, limit=100, country="US", pre_register_only=False):
         return None, f"Request failed: {e}"
 
 
-def discover_games_by_name(name, days_back, limit=100, country="US", pre_register_only=False):
+def discover_games_by_name(name, days_back, limit=100, country="US"):
     """Searches AppstoreSpy for games matching a name, within a release-date window."""
     if not APPSTORESPY_API_KEY:
         return None, "No AppstoreSpy API key configured."
@@ -331,21 +329,17 @@ def discover_games_by_name(name, days_back, limit=100, country="US", pre_registe
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=days_back)
 
-    filter_body = {
-        "name": name,
-        "category_type": "GAME",
-        "release_date": {"gte": start.isoformat(), "lte": today.isoformat()},
-    }
-    if pre_register_only:
-        filter_body["published"] = False
-
     body = {
         "limit": limit,
         "page": 1,
         "sort": "-downloads_daily",
         "fields": ["id", "name", "developer_id", "developer_name", "url", "icon", "downloads_daily"],
         "country": country,
-        "filter": filter_body,
+        "filter": {
+            "name": name,
+            "category_type": "GAME",
+            "release_date": {"gte": start.isoformat(), "lte": today.isoformat()},
+        },
     }
     headers = {
         "accept": "application/json",
@@ -482,9 +476,6 @@ with tab_spy:
     if "spy_window" not in st.session_state:
         st.session_state.spy_window = None
 
-    pre_reg_only = st.checkbox("Pre-register only (not yet published)", key="spy_pre_reg_checkbox")
-    st.caption("Note: uses the API's 'published' filter — may not perfectly mirror AppstoreSpy's own site UI for pre-registration.")
-
     col1, col2, col3 = st.columns(3)
     fetch_7 = col1.button("📅 Top 100 (7 days)", use_container_width=True, type="primary")
     fetch_30 = col2.button("📅 Top 100 (30 days)", use_container_width=True, type="primary")
@@ -493,7 +484,7 @@ with tab_spy:
     if fetch_7 or fetch_30 or fetch_90:
         days_back = 7 if fetch_7 else (30 if fetch_30 else 90)
         with st.spinner(f"Fetching top 100 games from the last {days_back} days..."):
-            games, error = discover_games(days_back=days_back, limit=100, pre_register_only=pre_reg_only)
+            games, error = discover_games(days_back=days_back, limit=100)
 
         if error:
             st.error(error)
@@ -573,8 +564,6 @@ with tab_search:
     search_name = st.text_input("Game name", key="search_name_input", placeholder="e.g. Geometry Dash")
     days_option = st.radio("Release date window", ["7 days", "30 days", "90 days"], horizontal=True, key="search_days_option")
     days_map = {"7 days": 7, "30 days": 30, "90 days": 90}
-    search_pre_reg_only = st.checkbox("Pre-register only (not yet published)", key="search_pre_reg_checkbox")
-
     if "search_results" not in st.session_state:
         st.session_state.search_results = None
 
@@ -583,9 +572,7 @@ with tab_search:
             st.warning("Please enter a game name.")
         else:
             with st.spinner(f"Searching for '{search_name}'..."):
-                results, error = discover_games_by_name(
-                    search_name.strip(), days_map[days_option], limit=100, pre_register_only=search_pre_reg_only
-                )
+                results, error = discover_games_by_name(search_name.strip(), days_map[days_option], limit=100)
 
             if error:
                 st.error(error)
