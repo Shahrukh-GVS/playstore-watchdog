@@ -298,6 +298,7 @@ def discover_games(days_back, limit=100, country="US", pre_register_only=False):
     }
     if pre_register_only:
         filter_body["pre_register"] = True
+        filter_body["published"] = True
     else:
         filter_body["published"] = True
 
@@ -343,6 +344,7 @@ def discover_games_by_name(name, days_back, limit=100, country="US", pre_registe
     }
     if pre_register_only:
         filter_body["pre_register"] = True
+        filter_body["published"] = True
 
     body = {
         "limit": limit,
