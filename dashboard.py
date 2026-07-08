@@ -808,8 +808,16 @@ with tab_country:
     code_by_label = {f"{name} ({code})": code for code, name in country_names_sorted}
 
     ccol1, ccol2 = st.columns(2)
-    country_a_label = ccol1.selectbox("Country A", country_labels, index=country_labels.index("United States (US)") if "United States (US)" in country_labels else 0)
-    country_b_label = ccol2.selectbox("Country B", country_labels, index=country_labels.index("United Kingdom (GB)") if "United Kingdom (GB)" in country_labels else 1)
+    country_a_label = ccol1.selectbox(
+        "Country A", country_labels,
+        index=country_labels.index("United States (US)") if "United States (US)" in country_labels else 0,
+        key="country_a_select",
+    )
+    country_b_label = ccol2.selectbox(
+        "Country B", country_labels,
+        index=country_labels.index("United Kingdom (GB)") if "United Kingdom (GB)" in country_labels else 1,
+        key="country_b_select",
+    )
 
     if st.button("🌍 Load Comparison", type="primary"):
         package_name = extract_package_name(country_url.strip()) if country_url.strip() else None
