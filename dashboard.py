@@ -15,7 +15,6 @@ Three tabs:
 
 import os
 import re
-import json
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 import requests
@@ -373,63 +372,6 @@ def discover_games_by_name(name, days_back, limit=100, country="US", pre_registe
         return None, f"Request failed: {e}"
 
 
-def find_app_by_name_and_developer(game_name, account_name, country="US"):
-    """
-    Searches AppstoreSpy by game name, then cross-checks the developer name
-    against the given account to find the correct match (since names can
-    collide, e.g. many "Farm Simulator" games exist under different studios).
-    Returns (matched_app_dict_or_None, note).
-    """
-    if not APPSTORESPY_API_KEY:
-        return None, "No AppstoreSpy API key configured."
-
-    body = {
-        "limit": 10,
-        "page": 1,
-        "fields": ["id", "name", "developer_id", "developer_name", "url", "icon"],
-        "country": country,
-        "filter": {
-            "name": game_name,
-            "category_type": "GAME",
-        },
-    }
-    headers = {
-        "accept": "application/json",
-        "API-KEY": APPSTORESPY_API_KEY,
-        "Content-Type": "application/json",
-    }
-
-    try:
-        resp = requests.post(
-            "https://api.appstorespy.com/v1/play/apps/query",
-            json=body, headers=headers, timeout=20,
-        )
-        if resp.status_code != 200:
-            return None, f"API error {resp.status_code}"
-        data = resp.json().get("data", [])
-    except Exception as e:
-        return None, f"Request failed: {e}"
-
-    if not data:
-        return None, "no results found"
-
-    account_lower = account_name.strip().lower()
-
-    # Prefer an exact developer name match
-    for item in data:
-        if (item.get("developer_name") or "").strip().lower() == account_lower:
-            return item, None
-
-    # Fall back to a partial/contains match
-    for item in data:
-        dn = (item.get("developer_name") or "").strip().lower()
-        if dn and (account_lower in dn or dn in account_lower):
-            return item, None
-
-    # No confident developer match — return the first result but flag it
-    return data[0], "uncertain match (developer name didn't match exactly)"
-
-
 def run_trace(url):
     package_name = extract_package_name(url)
     if not package_name:
@@ -490,8 +432,8 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab_search, tab_batch, tab2, tab_short, tab3, tab4 = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "📋 Batch Import",
+tab1, tab_spy, tab_search, tab2, tab_short, tab3, tab4 = st.tabs(
+    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name",
      "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
 )
 
@@ -721,111 +663,8 @@ with tab_search:
             if match_details:
                 st.write("\n".join(match_details))
 
-# --- Tab: Batch Import (JSON) ---
-with tab_batch:
-    st.subheader("Batch Import from JSON")
-    st.caption(
-        'Paste a JSON array of {"game": "...", "account": "..."} objects. '
-        "Each will be looked up on AppstoreSpy to find its Play Store link, "
-        "cross-checking the developer name to avoid mismatches on common game names."
-    )
-
-    json_input = st.text_area(
-        "Paste JSON here", height=250, key="batch_json_input",
-        placeholder='[\n  {"game": "Never Grave", "account": "Pocketpair Publishing"},\n  {"game": "Subway Surfers", "account": "Aromex Cowanta"}\n]',
-    )
-
-    if "batch_results" not in st.session_state:
-        st.session_state.batch_results = None
-
-    if st.button("🔍 Fetch package info", type="primary"):
-        entries = None
-        try:
-            entries = json.loads(json_input)
-            if not isinstance(entries, list):
-                st.error("JSON must be an array of objects.")
-                entries = None
-        except Exception as e:
-            st.error(f"Invalid JSON: {e}")
-
-        if entries:
-            progress = st.progress(0)
-            status_text = st.empty()
-            results = []
-
-            for i, entry in enumerate(entries):
-                game_name = entry.get("game", "")
-                account_name = entry.get("account", "")
-                status_text.write(f"Looking up: {game_name} ({account_name})...")
-
-                match, note = find_app_by_name_and_developer(game_name, account_name)
-
-                if match:
-                    status = "✅ Matched" if not note else f"⚠️ {note}"
-                else:
-                    status = f"❌ {note}"
-
-                results.append({
-                    "Game (input)": game_name,
-                    "Account (input)": account_name,
-                    "Icon": match.get("icon") if match else None,
-                    "Found Developer": match.get("developer_name") if match else "-",
-                    "Link": match.get("url") if match else None,
-                    "Status": status,
-                })
-                progress.progress((i + 1) / len(entries))
-
-            status_text.empty()
-            st.session_state.batch_results = results
-
-    if st.session_state.batch_results:
-        results = st.session_state.batch_results
-        matched_count = len([r for r in results if r["Link"]])
-        st.markdown(f"### Results — {matched_count} of {len(results)} matched")
-
-        st.dataframe(
-            results,
-            column_config={
-                "Icon": st.column_config.ImageColumn("Icon", width="small"),
-                "Link": st.column_config.LinkColumn("Link", display_text="Open"),
-            },
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        matched_links = [r["Link"] for r in results if r["Link"]]
-
-        if matched_links:
-            st.markdown("---")
-            st.write(f"Ready to check all {len(matched_links)} matched games for app-ads.txt matches?")
-
-            if st.button("🔎 Trace matched games", type="primary"):
-                progress = st.progress(0)
-                summary = {"match": 0, "already_exists": 0, "no_match": 0, "other": 0}
-                match_details = []
-
-                for i, url in enumerate(matched_links):
-                    result = run_trace(url)
-                    if result["status"] == "match":
-                        summary["match"] += 1
-                        match_details.append(f"✅ New developer added (from {url})")
-                    elif result["status"] == "already_exists":
-                        summary["already_exists"] += 1
-                    elif result["status"] == "no_match":
-                        summary["no_match"] += 1
-                    else:
-                        summary["other"] += 1
-                    progress.progress((i + 1) / len(matched_links))
-
-                st.success(
-                    f"**Tracing complete:**\n\n"
-                    f"- New matches added: **{summary['match']}**\n"
-                    f"- Already in watchlist: **{summary['already_exists']}**\n"
-                    f"- No match: **{summary['no_match']}**\n"
-                    f"- Skipped/errors: **{summary['other']}**"
-                )
-                if match_details:
-                    st.write("\n".join(match_details))
+            if match_details:
+                st.write("\n".join(match_details))
 
 with tab2:
     st.subheader("Watched developers")
