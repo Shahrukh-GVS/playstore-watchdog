@@ -90,7 +90,8 @@ def extract_install_info(soup):
     m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
     if m:
         return False, m.group(1)
-    return False, None
+    # No install count found at all -> treat as pre-registration
+    return True, None
 
 
 def extract_canonical_title(soup):
