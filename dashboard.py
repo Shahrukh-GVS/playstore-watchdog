@@ -248,52 +248,12 @@ def extract_canonical_title(soup):
 
 
 def extract_install_info(soup):
-    """Fast fallback check using plain HTML (misses JS-rendered pre-register buttons)."""
     page_text = soup.get_text(" ", strip=True)
     if re.search(r"pre-?register", page_text, re.IGNORECASE):
         return True, None
     m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
     if m:
         return False, m.group(1)
-    return False, None
-
-
-def check_install_info_browser(package_name, country="us"):
-    """Accurate check using a real headless browser. Returns None if
-    Playwright/Chromium isn't available in this environment (e.g. Streamlit
-    Cloud), so callers fall back to the plain-HTML method automatically."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return None
-
-    url = f"https://play.google.com/store/apps/details?id={package_name}&gl={country}&hl=en"
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(url, timeout=20000, wait_until="networkidle")
-            page_text = page.inner_text("body")
-            browser.close()
-
-        if re.search(r"pre-?register", page_text, re.IGNORECASE):
-            return True, None
-        m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
-        if m:
-            return False, m.group(1)
-        return False, None
-    except Exception:
-        return None
-
-
-def get_install_info(package_name, soup=None, country="us"):
-    """Tries the accurate browser-based check first; falls back to plain HTML
-    if Chromium isn't available in this environment."""
-    result = check_install_info_browser(package_name, country)
-    if result is not None:
-        return result
-    if soup is not None:
-        return extract_install_info(soup)
     return False, None
 
 
@@ -307,7 +267,7 @@ def insert_apps(developer_id, apps):
         detail_soup = fetch_app_page(app["package_name"])
         canonical_title = extract_canonical_title(detail_soup) if detail_soup else None
         final_title = canonical_title or app["title"]
-        is_pre_reg, installs = get_install_info(app["package_name"], soup=detail_soup)
+        is_pre_reg, installs = extract_install_info(detail_soup) if detail_soup else (False, None)
 
         supabase.table("apps").insert({
             "package_name": app["package_name"], "developer_id": developer_id,

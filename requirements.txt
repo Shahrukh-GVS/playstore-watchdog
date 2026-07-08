@@ -6,4 +6,3 @@ python-dotenv
 Pillow
 imagehash
 streamlit
-playwright

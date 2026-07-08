@@ -83,59 +83,13 @@ def extract_dev_id_from_link(dev_link):
 
 
 def extract_install_info(soup):
-    """Fast fallback check using plain HTML (misses JS-rendered pre-register buttons)."""
+    """Returns (is_pre_registration: bool, installs_bracket: str|None)"""
     page_text = soup.get_text(" ", strip=True)
     if re.search(r"pre-?register", page_text, re.IGNORECASE):
         return True, None
     m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
     if m:
         return False, m.group(1)
-    return False, None
-
-
-def check_install_info_browser(package_name, country="us"):
-    """
-    Accurate check using a real headless browser — Google Play renders the
-    'Pre-register' button via JavaScript after page load, so a plain HTML
-    fetch (extract_install_info above) misses it for some listings.
-    Returns (is_pre_registration, installs_bracket) or None if Playwright
-    isn't available/working, so callers can fall back gracefully.
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        return None
-
-    url = f"https://play.google.com/store/apps/details?id={package_name}&gl={country}&hl=en"
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(user_agent=HEADERS["User-Agent"])
-            page.goto(url, timeout=20000, wait_until="networkidle")
-            page_text = page.inner_text("body")
-            browser.close()
-
-        if re.search(r"pre-?register", page_text, re.IGNORECASE):
-            return True, None
-        m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
-        if m:
-            return False, m.group(1)
-        return False, None
-    except Exception as e:
-        print(f"[warn] Playwright check failed for {package_name}: {e}")
-        return None
-
-
-def get_install_info(package_name, soup=None, country="us"):
-    """
-    Tries the accurate browser-based check first; falls back to the fast
-    plain-HTML method if Playwright isn't available or fails.
-    """
-    result = check_install_info_browser(package_name, country)
-    if result is not None:
-        return result
-    if soup is not None:
-        return extract_install_info(soup)
     return False, None
 
 
@@ -439,7 +393,9 @@ def main():
 
         if stored is None:
             soup = fetch_app_page(package_name)
-            is_pre_reg, installs = get_install_info(package_name, soup=soup)
+            is_pre_reg, installs = (True, None)
+            if soup:
+                is_pre_reg, installs = extract_install_info(soup)
 
             canonical_title = extract_canonical_title(soup) if soup else None
             final_title = canonical_title or fresh["title"]
