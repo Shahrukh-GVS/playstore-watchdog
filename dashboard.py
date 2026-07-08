@@ -824,6 +824,8 @@ with tab2:
     developers = supabase.table("developers").select("*").order("first_seen", desc=True).execute().data
     apps_all = supabase.table("apps").select("*").execute().data
 
+    title_search = st.text_input("🔍 Search by game title", key="watchlist_title_search", placeholder="Type to filter games by name...")
+
     if recheck_clicked:
         known_ids = get_known_ids()
         no_longer_matching = []
@@ -906,8 +908,17 @@ with tab2:
     if not developers:
         st.info("No developers tracked yet. Use the Trace tab to add one.")
 
+    any_match_shown = False
+
     for dev in developers:
         dev_apps = [a for a in apps_all if a["developer_id"] == dev["id"]]
+
+        if title_search.strip():
+            dev_apps = [a for a in dev_apps if title_search.strip().lower() in (a.get("title") or "").lower()]
+            if not dev_apps:
+                continue  # hide developers with no matching games while searching
+
+        any_match_shown = True
         active_count = len([a for a in dev_apps if a["status"] == "active"])
         removed_count = len([a for a in dev_apps if a["status"] == "removed"])
 
@@ -969,6 +980,9 @@ with tab2:
                 if st.button("🗑️ Delete this account", key=f"delete_{dev['id']}"):
                     st.session_state.confirm_delete_dev = dev["id"]
                     st.rerun()
+
+    if title_search.strip() and not any_match_shown:
+        st.info(f"No games found matching '{title_search.strip()}'.")
 
 # --- Tab: Shortlisted ---
 with tab_short:
