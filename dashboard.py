@@ -547,8 +547,8 @@ def run_trace(url):
 st.title("Play Store Watchdog")
 
 tab1, tab_spy, tab_search, tab_country, tab2, tab_short, tab3, tab4 = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🌍 Country Comparison",
-     "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
+    ["Trace", "AppStore Spy", "Search", "Country Compare",
+     "Watchlist", "Shortlisted", "Activity", "Ad IDs"]
 )
 
 # --- Tab 1: Trace ---
