@@ -497,10 +497,29 @@ with tab_spy:
     fetch_30 = col2.button("📅 Top 100 (30 days)", use_container_width=True, type="primary")
     fetch_90 = col3.button("📅 Top 100 (90 days)", use_container_width=True, type="primary")
 
-    if fetch_7 or fetch_30 or fetch_90:
-        days_back = 7 if fetch_7 else (30 if fetch_30 else 90)
-        with st.spinner(f"Fetching top 100 games from the last {days_back} days..."):
-            games, error = discover_games(days_back=days_back, limit=100, pre_register_only=pre_reg_only)
+    col4, col5, col6 = st.columns(3)
+    fetch_7_1k = col4.button("📅 Top 1000 (7 days)", use_container_width=True)
+    fetch_30_1k = col5.button("📅 Top 1000 (30 days)", use_container_width=True)
+    fetch_90_1k = col6.button("📅 Top 1000 (90 days)", use_container_width=True)
+    st.caption("⚠️ Top 1000 uses more API credits and tracing all results afterward will take significantly longer.")
+
+    days_back, fetch_limit = None, 100
+    if fetch_7:
+        days_back, fetch_limit = 7, 100
+    elif fetch_30:
+        days_back, fetch_limit = 30, 100
+    elif fetch_90:
+        days_back, fetch_limit = 90, 100
+    elif fetch_7_1k:
+        days_back, fetch_limit = 7, 1000
+    elif fetch_30_1k:
+        days_back, fetch_limit = 30, 1000
+    elif fetch_90_1k:
+        days_back, fetch_limit = 90, 1000
+
+    if days_back:
+        with st.spinner(f"Fetching top {fetch_limit} games from the last {days_back} days..."):
+            games, error = discover_games(days_back=days_back, limit=fetch_limit, pre_register_only=pre_reg_only)
 
         if error:
             st.error(error)
