@@ -263,13 +263,52 @@ def extract_canonical_title(soup) -> str | None:
 
 
 def extract_install_info(soup):
-    """Returns (is_pre_registration: bool, installs_bracket: str|None)"""
+    """Fast fallback check using plain HTML (misses JS-rendered pre-register buttons)."""
     page_text = soup.get_text(" ", strip=True)
     if re.search(r"pre-?register", page_text, re.IGNORECASE):
         return True, None
     m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
     if m:
         return False, m.group(1)
+    return False, None
+
+
+def check_install_info_browser(package_name, country="us"):
+    """Accurate check using a real headless browser (catches JS-rendered
+    'Pre-register' buttons that plain HTML fetching misses). Returns
+    (is_pre_registration, installs_bracket) or None if unavailable/failed."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return None
+
+    url = f"https://play.google.com/store/apps/details?id={package_name}&gl={country}&hl=en"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            page.goto(url, timeout=20000, wait_until="networkidle")
+            page_text = page.inner_text("body")
+            browser.close()
+
+        if re.search(r"pre-?register", page_text, re.IGNORECASE):
+            return True, None
+        m = re.search(r"([\d.,]+[KMB]?\+)\s*Downloads", page_text, re.IGNORECASE)
+        if m:
+            return False, m.group(1)
+        return False, None
+    except Exception as e:
+        print(f"[warn] Playwright check failed for {package_name}: {e}")
+        return None
+
+
+def get_install_info(package_name, soup=None, country="us"):
+    """Tries the accurate browser-based check first; falls back to plain HTML."""
+    result = check_install_info_browser(package_name, country)
+    if result is not None:
+        return result
+    if soup is not None:
+        return extract_install_info(soup)
     return False, None
 
 
@@ -286,7 +325,7 @@ def insert_apps(developer_id: int, apps: list):
         detail_soup = fetch_app_page(app["package_name"])
         canonical_title = extract_canonical_title(detail_soup) if detail_soup else None
         final_title = canonical_title or app["title"]
-        is_pre_reg, installs = extract_install_info(detail_soup) if detail_soup else (False, None)
+        is_pre_reg, installs = get_install_info(app["package_name"], soup=detail_soup)
 
         supabase.table("apps").insert({
             "package_name": app["package_name"],
