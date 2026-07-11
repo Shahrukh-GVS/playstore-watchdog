@@ -204,7 +204,16 @@ def normalize_title(raw_title, developer_name=None):
     return text.strip()
 
 
+def ensure_gl_us(url):
+    """Makes sure a Play Store URL always includes gl=us, appending it if missing."""
+    if "gl=" in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}gl=us"
+
+
 def fetch_developer_catalog(dev_link, developer_name=None):
+    dev_link = ensure_gl_us(dev_link)
     resp = requests.get(dev_link, headers=HEADERS, timeout=15)
     if resp.status_code != 200:
         return []
@@ -575,7 +584,7 @@ with tab_spy:
             "Name": g.get("name"),
             "Developer": g.get("developer_name"),
             "Daily Installs": g.get("downloads_daily"),
-            "Link": g.get("url"),
+            "Link": ensure_gl_us(g.get("url")) if g.get("url") else None,
         } for g in games]
 
         st.dataframe(
@@ -666,7 +675,7 @@ with tab_search:
             "Name": g.get("name"),
             "Developer": g.get("developer_name"),
             "Daily Installs": g.get("downloads_daily"),
-            "Link": g.get("url"),
+            "Link": ensure_gl_us(g.get("url")) if g.get("url") else None,
         } for g in results]
 
         st.dataframe(

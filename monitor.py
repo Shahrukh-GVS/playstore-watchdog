@@ -37,6 +37,7 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+SLACK_WEBHOOK_URL_MAIN = os.getenv("SLACK_WEBHOOK_URL_MAIN")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -162,7 +163,16 @@ def normalize_title(raw_title, developer_name=None):
     return text.strip()
 
 
+def ensure_gl_us(url):
+    """Makes sure a Play Store URL always includes gl=us, appending it if missing."""
+    if "gl=" in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}gl=us"
+
+
 def fetch_developer_catalog(dev_link, developer_name=None):
+    dev_link = ensure_gl_us(dev_link)
     try:
         resp = requests.get(dev_link, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
@@ -239,6 +249,16 @@ def check_app_directly(package_name, last_status, last_seen_iso):
     return "removed", None
 
 
+def send_slack(text_blocks):
+    if not SLACK_WEBHOOK_URL_MAIN:
+        return
+    for text in text_blocks:
+        try:
+            requests.post(SLACK_WEBHOOK_URL_MAIN, json={"text": text}, timeout=15)
+        except Exception as e:
+            print(f"[warn] Slack send failed: {e}")
+
+
 def send_digest(events, run_id=None):
     total = sum(len(v) for v in events.values())
     footer = {"text": f"Check run: {run_id}"} if run_id else None
@@ -253,9 +273,11 @@ def send_digest(events, run_id=None):
         if footer:
             embed["footer"] = footer
         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
+        send_slack([f":white_check_mark: Watchdog check complete — nothing new this cycle."])
         return
 
     embeds = []
+    slack_texts = []
 
     def play_link(package_name):
         return f"https://play.google.com/store/apps/details?id={package_name}&gl=us"
@@ -271,6 +293,7 @@ def send_digest(events, run_id=None):
         if ev.get("icon_url"):
             embed["thumbnail"] = {"url": ev["icon_url"]}
         embeds.append(embed)
+        slack_texts.append(f":new: New upload: *{ev['title']}* ({ev['developer_name']}) — <{link}|Open>")
 
     for ev in events.get("transferred_in", []):
         link = play_link(ev["package_name"])
@@ -284,6 +307,7 @@ def send_digest(events, run_id=None):
         if ev.get("icon_url"):
             embed["thumbnail"] = {"url": ev["icon_url"]}
         embeds.append(embed)
+        slack_texts.append(f":inbox_tray: Transferred in: *{ev['title']}* → {ev['developer_name']} — <{link}|Open>")
 
     for ev in events.get("transferred", []):
         link = play_link(ev["package_name"])
@@ -294,6 +318,7 @@ def send_digest(events, run_id=None):
                              f"[Open on Play Store]({link})"),
             "color": COLOR_TRANSFER,
         })
+        slack_texts.append(f":twisted_rightwards_arrows: Transferred: *{ev['title']}* — {ev['old_dev']} → {ev['new_dev']} — <{link}|Open>")
 
     for ev in events.get("removed", []):
         link = play_link(ev["package_name"])
@@ -303,14 +328,18 @@ def send_digest(events, run_id=None):
                              f"[Last known Play Store link]({link}) (likely dead now)"),
             "color": COLOR_REMOVED,
         })
+        slack_texts.append(f":wastebasket: Removed: *{ev['title']}* ({ev['developer_name']}) — <{link}|Last known link>")
 
     for ev in events.get("listing_changed", []):
         link = play_link(ev["package_name"])
         desc_lines = []
+        slack_lines = []
         if ev.get("title_changed"):
             desc_lines.append(f"Title: **{ev['old_title']}** -> **{ev['new_title']}**")
+            slack_lines.append(f"Title: {ev['old_title']} -> {ev['new_title']}")
         if ev.get("icon_changed"):
             desc_lines.append("Icon changed (see images below)")
+            slack_lines.append("Icon changed")
         desc_lines.append(f"Package: `{ev['package_name']}`")
         desc_lines.append(f"[Open on Play Store]({link})")
 
@@ -321,6 +350,7 @@ def send_digest(events, run_id=None):
             if ev.get("new_icon_url"):
                 embed["image"] = {"url": ev["new_icon_url"]}
         embeds.append(embed)
+        slack_texts.append(f":art: Listing changed — " + "; ".join(slack_lines) + f" — <{link}|Open>")
 
     if footer and embeds:
         embeds[-1]["footer"] = footer
@@ -328,6 +358,8 @@ def send_digest(events, run_id=None):
     for i in range(0, len(embeds), 10):
         batch = embeds[i:i + 10]
         requests.post(DISCORD_WEBHOOK_URL, json={"embeds": batch}, timeout=15)
+
+    send_slack(slack_texts)
 
 
 def upsert_developer(dev_name, dev_link):

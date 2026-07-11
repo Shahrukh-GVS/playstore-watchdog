@@ -101,7 +101,16 @@ def extract_canonical_title(soup):
     return None
 
 
+def ensure_gl_us(url):
+    """Makes sure a Play Store URL always includes gl=us, appending it if missing."""
+    if "gl=" in url:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}gl=us"
+
+
 def fetch_developer_catalog(dev_link, developer_name=None):
+    dev_link = ensure_gl_us(dev_link)
     try:
         resp = requests.get(dev_link, headers=HEADERS, timeout=15)
         if resp.status_code != 200:
