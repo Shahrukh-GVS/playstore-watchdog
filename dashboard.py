@@ -372,6 +372,41 @@ def discover_games_by_name(name, days_back, limit=100, country="US", pre_registe
         return None, f"Request failed: {e}"
 
 
+def add_own_account(account_label, dev_url):
+    """Adds one of the user's own developer accounts directly (no app-ads.txt
+    matching needed, since ownership is already known). Pulls the full
+    catalog and inserts it, tagged source='own_account'."""
+    dev_url = dev_url.strip()
+    if not dev_url.startswith("http"):
+        return {"status": "error", "message": "Please paste a full developer page URL."}
+
+    dev_id_match = re.search(r"[?&]id=([a-zA-Z0-9._+-]+)", dev_url)
+    if not dev_id_match:
+        return {"status": "error", "message": "Could not find a developer ID in that URL."}
+    dev_id = dev_id_match.group(1)
+
+    existing = supabase.table("developers").select("id").eq("dev_id", dev_id).execute()
+    if existing.data:
+        developer_id = existing.data[0]["id"]
+        supabase.table("developers").update({
+            "name": account_label, "source": "own_account",
+        }).eq("id", developer_id).execute()
+    else:
+        result = supabase.table("developers").insert({
+            "dev_id": dev_id, "name": account_label,
+            "developer_url": dev_url, "source": "own_account",
+        }).execute()
+        developer_id = result.data[0]["id"]
+
+    catalog = fetch_developer_catalog(dev_url, developer_name=account_label)
+    inserted = insert_apps(developer_id, catalog)
+
+    return {
+        "status": "added",
+        "message": f"**{account_label}** added as your own account. {len(catalog)} apps found, {inserted} newly added.",
+    }
+
+
 def run_trace(url):
     package_name = extract_package_name(url)
     if not package_name:
@@ -432,8 +467,8 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab_search, tab2, tab_short, tab3, tab4 = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name",
+tab1, tab_spy, tab_search, tab_mine, tab2, tab_short, tab3, tab4 = st.tabs(
+    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🏢 My Accounts",
      "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
 )
 
@@ -682,6 +717,85 @@ with tab_search:
             if match_details:
                 st.write("\n".join(match_details))
 
+# --- Tab: My Accounts ---
+with tab_mine:
+    st.subheader("My Accounts")
+    st.caption("Add your own Google Play developer accounts here — no app-ads.txt matching needed, since ownership is already known. These get checked every 30 minutes by a separate monitor, with alerts to Discord and Slack.")
+
+    with st.form("add_own_account_form", clear_on_submit=True):
+        account_label = st.text_input("Account name (your own label)")
+        dev_url = st.text_input("Developer page URL", placeholder="https://play.google.com/store/apps/dev?id=... or /developer?id=...")
+        submitted = st.form_submit_button("➕ Add my account", type="primary")
+
+        if submitted:
+            if not account_label.strip() or not dev_url.strip():
+                st.warning("Both fields are required.")
+            else:
+                with st.spinner("Fetching account catalog..."):
+                    result = add_own_account(account_label.strip(), dev_url.strip())
+                if result["status"] == "added":
+                    st.success(result["message"])
+                else:
+                    st.error(result["message"])
+
+    st.markdown("---")
+    st.subheader("Your registered accounts")
+
+    own_developers = supabase.table("developers").select("*").eq("source", "own_account").order("first_seen", desc=True).execute().data
+    all_apps = supabase.table("apps").select("*").execute().data
+
+    if "confirm_delete_own" not in st.session_state:
+        st.session_state.confirm_delete_own = None
+
+    if not own_developers:
+        st.info("No own accounts added yet. Use the form above.")
+
+    for dev in own_developers:
+        dev_apps = [a for a in all_apps if a["developer_id"] == dev["id"]]
+        active_count = len([a for a in dev_apps if a["status"] == "active"])
+        removed_count = len([a for a in dev_apps if a["status"] == "removed"])
+
+        with st.expander(f"**{dev['name']}** — {active_count} active, {removed_count} removed ({len(dev_apps)} total)"):
+            st.caption(f"Developer page: {dev['developer_url']}")
+            st.caption(f"Last checked: {dev.get('last_checked', 'never')}")
+
+            if dev_apps:
+                table_data = [{
+                    "Icon": a.get("icon_url"),
+                    "Title": a["title"],
+                    "Package": a["package_name"],
+                    "Status": a["status"],
+                } for a in dev_apps]
+                st.dataframe(
+                    table_data,
+                    column_config={"Icon": st.column_config.ImageColumn("Icon", width="small")},
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.write("No apps recorded yet.")
+
+            st.markdown("---")
+            if st.session_state.confirm_delete_own == dev["id"]:
+                st.warning(f"Remove **{dev['name']}** from monitoring? This cannot be undone.")
+                dcol1, dcol2 = st.columns(2)
+                if dcol1.button("Yes, delete", key=f"own_confirm_yes_{dev['id']}", type="primary"):
+                    app_ids = [a["id"] for a in dev_apps]
+                    if app_ids:
+                        supabase.table("change_log").delete().in_("app_id", app_ids).execute()
+                    supabase.table("change_log").delete().eq("developer_id", dev["id"]).execute()
+                    supabase.table("apps").delete().eq("developer_id", dev["id"]).execute()
+                    supabase.table("developers").delete().eq("id", dev["id"]).execute()
+                    st.session_state.confirm_delete_own = None
+                    st.rerun()
+                if dcol2.button("Cancel", key=f"own_confirm_no_{dev['id']}"):
+                    st.session_state.confirm_delete_own = None
+                    st.rerun()
+            else:
+                if st.button("🗑️ Remove from monitoring", key=f"own_delete_{dev['id']}"):
+                    st.session_state.confirm_delete_own = dev["id"]
+                    st.rerun()
+
 with tab2:
     st.subheader("Watched developers")
 
@@ -694,7 +808,7 @@ with tab2:
     if "confirm_delete_dev" not in st.session_state:
         st.session_state.confirm_delete_dev = None
 
-    developers = supabase.table("developers").select("*").order("first_seen", desc=True).execute().data
+    developers = supabase.table("developers").select("*").neq("source", "own_account").order("first_seen", desc=True).execute().data
     apps_all = supabase.table("apps").select("*").execute().data
 
     title_search = st.text_input("🔍 Search by game title", key="watchlist_title_search", placeholder="Type to filter games by name...")
