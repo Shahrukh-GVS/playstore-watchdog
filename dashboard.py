@@ -416,85 +416,6 @@ def add_own_account(account_label, dev_url):
     }
 
 
-PLAY_STORE_COUNTRIES = {
-    "AL": "Albania", "DZ": "Algeria", "AO": "Angola", "AG": "Antigua & Barbuda",
-    "AR": "Argentina", "AM": "Armenia", "AW": "Aruba", "AU": "Australia", "AT": "Austria",
-    "AZ": "Azerbaijan", "BS": "Bahamas", "BH": "Bahrain", "BD": "Bangladesh", "BY": "Belarus",
-    "BE": "Belgium", "BZ": "Belize", "BJ": "Benin", "BM": "Bermuda", "BO": "Bolivia",
-    "BA": "Bosnia & Herzegovina", "BW": "Botswana", "BR": "Brazil", "VG": "British Virgin Islands",
-    "BG": "Bulgaria", "BF": "Burkina Faso", "KH": "Cambodia", "CM": "Cameroon", "CA": "Canada",
-    "CV": "Cape Verde", "KY": "Cayman Islands", "TD": "Chad", "CL": "Chile", "CN": "China",
-    "CO": "Colombia", "KM": "Comoros", "CG": "Congo - Brazzaville", "CD": "Congo - Kinshasa",
-    "CR": "Costa Rica", "HR": "Croatia", "CU": "Cuba", "CY": "Cyprus", "CZ": "Czechia",
-    "CI": "Côte d'Ivoire", "DK": "Denmark", "DJ": "Djibouti", "DM": "Dominica",
-    "DO": "Dominican Republic", "EC": "Ecuador", "EG": "Egypt", "SV": "El Salvador",
-    "ER": "Eritrea", "EE": "Estonia", "FJ": "Fiji", "FI": "Finland", "FR": "France",
-    "GA": "Gabon", "GM": "Gambia", "GE": "Georgia", "DE": "Germany", "GH": "Ghana",
-    "GI": "Gibraltar", "GR": "Greece", "GD": "Grenada", "GT": "Guatemala", "GN": "Guinea",
-    "GW": "Guinea-Bissau", "HT": "Haiti", "HN": "Honduras", "HK": "Hong Kong", "HU": "Hungary",
-    "IS": "Iceland", "IN": "India", "ID": "Indonesia", "IR": "Iran", "IQ": "Iraq",
-    "IE": "Ireland", "IL": "Israel", "IT": "Italy", "JM": "Jamaica", "JP": "Japan",
-    "JO": "Jordan", "KZ": "Kazakhstan", "KE": "Kenya", "KW": "Kuwait", "KG": "Kyrgyzstan",
-    "LA": "Laos", "LV": "Latvia", "LB": "Lebanon", "LR": "Liberia", "LY": "Libya",
-    "LI": "Liechtenstein", "LT": "Lithuania", "LU": "Luxembourg", "MO": "Macao",
-    "MY": "Malaysia", "MV": "Maldives", "ML": "Mali", "MT": "Malta", "MU": "Mauritius",
-    "MX": "Mexico", "FM": "Micronesia", "MD": "Moldova", "MC": "Monaco", "MN": "Mongolia",
-    "MA": "Morocco", "MZ": "Mozambique", "MM": "Myanmar (Burma)", "NA": "Namibia",
-    "NP": "Nepal", "NL": "Netherlands", "NZ": "New Zealand", "NI": "Nicaragua", "NE": "Niger",
-    "NG": "Nigeria", "MK": "North Macedonia", "NO": "Norway", "OM": "Oman", "PK": "Pakistan",
-    "PA": "Panama", "PG": "Papua New Guinea", "PY": "Paraguay", "PE": "Peru",
-    "PH": "Philippines", "PL": "Poland", "PT": "Portugal", "QA": "Qatar", "RO": "Romania",
-    "RU": "Russia", "RW": "Rwanda", "WS": "Samoa", "SM": "San Marino", "SA": "Saudi Arabia",
-    "SN": "Senegal", "RS": "Serbia", "SC": "Seychelles", "SL": "Sierra Leone", "SG": "Singapore",
-    "SK": "Slovakia", "SI": "Slovenia", "SB": "Solomon Islands", "SO": "Somalia",
-    "ZA": "South Africa", "KR": "South Korea", "ES": "Spain", "LK": "Sri Lanka",
-    "KN": "St Kitts & Nevis", "LC": "St Lucia", "SD": "Sudan", "SR": "Suriname",
-    "SE": "Sweden", "CH": "Switzerland", "TW": "Taiwan", "TJ": "Tajikistan", "TZ": "Tanzania",
-    "TH": "Thailand", "TG": "Togo", "TO": "Tonga", "TT": "Trinidad & Tobago", "TN": "Tunisia",
-    "TM": "Turkmenistan", "TC": "Turks & Caicos Islands", "TR": "Türkiye", "UG": "Uganda",
-    "UA": "Ukraine", "AE": "United Arab Emirates", "GB": "United Kingdom", "US": "United States",
-    "UY": "Uruguay", "UZ": "Uzbekistan", "VU": "Vanuatu", "VA": "Vatican City",
-    "VE": "Venezuela", "VN": "Vietnam", "YE": "Yemen", "ZM": "Zambia", "ZW": "Zimbabwe",
-}
-
-
-def get_app_country_details(package_name, country_code):
-    """
-    Queries AppstoreSpy for one app's data as seen from one specific country.
-    Returns a dict of whatever fields came back, or None if unavailable/error.
-    NOTE: chart_info's exact structure is unverified — inspect the raw output
-    on first real test and tell me what it contains so I can parse it properly.
-    """
-    if not APPSTORESPY_API_KEY:
-        return None
-
-    body = {
-        "limit": 1,
-        "page": 1,
-        "country": country_code,
-        "fields": ["id", "name", "published", "downloads_exact", "downloads_mark",
-                   "review_count", "rating_avg", "rating_count", "chart_info"],
-        "filter": {"bundle": [package_name]},
-    }
-    headers = {
-        "accept": "application/json",
-        "API-KEY": APPSTORESPY_API_KEY,
-        "Content-Type": "application/json",
-    }
-
-    try:
-        resp = requests.post(
-            "https://api.appstorespy.com/v1/play/apps/query",
-            json=body, headers=headers, timeout=20,
-        )
-        if resp.status_code != 200:
-            return None
-        data = resp.json().get("data", [])
-        return data[0] if data else None
-    except Exception:
-        return None
-
-
 def run_trace(url):
     package_name = extract_package_name(url)
     if not package_name:
@@ -555,8 +476,8 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab_search, tab_mine, tab_details, tab2, tab_short, tab3, tab4 = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🏢 My Accounts", "🌍 Country Details",
+tab1, tab_spy, tab_search, tab_mine, tab2, tab_short, tab3, tab4 = st.tabs(
+    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🏢 My Accounts",
      "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
 )
 
@@ -883,61 +804,6 @@ with tab_mine:
                 if st.button("🗑️ Remove from monitoring", key=f"own_delete_{dev['id']}"):
                     st.session_state.confirm_delete_own = dev["id"]
                     st.rerun()
-
-# --- Tab: Country Details ---
-with tab_details:
-    st.subheader("Country Details (via AppstoreSpy)")
-    st.caption(
-        "Enter a game URL to get a line-by-line breakdown per country: downloads, reviews, rating. "
-        "Uses AppstoreSpy's data instead of scraping — more accurate, but costs 1 API call per country checked "
-        "(~176 calls for a full scan)."
-    )
-
-    details_url = st.text_input("Paste the Play Store game URL", key="details_url_input")
-
-    if st.button("🌍 Get Country Details", type="primary"):
-        package_name = extract_package_name(details_url.strip()) if details_url.strip() else None
-
-        if not package_name:
-            st.warning("Please paste a valid Play Store game URL.")
-        else:
-            progress = st.progress(0)
-            status_text = st.empty()
-            rows = []
-            codes = list(PLAY_STORE_COUNTRIES.keys())
-
-            for i, code in enumerate(codes):
-                status_text.write(f"Checking {PLAY_STORE_COUNTRIES[code]} ({code})... [{i+1}/{len(codes)}]")
-                info = get_app_country_details(package_name, code)
-
-                if info:
-                    rows.append({
-                        "Country": f"{PLAY_STORE_COUNTRIES[code]} ({code})",
-                        "Published": "Yes" if info.get("published") else "No",
-                        "Downloads (exact)": info.get("downloads_exact") or "-",
-                        "Downloads (range)": info.get("downloads_mark") or "-",
-                        "Reviews": info.get("review_count") or "-",
-                        "Rating": info.get("rating_avg") or "-",
-                        "Chart Info (raw)": str(info.get("chart_info")) if info.get("chart_info") else "-",
-                    })
-                else:
-                    rows.append({
-                        "Country": f"{PLAY_STORE_COUNTRIES[code]} ({code})",
-                        "Published": "Unavailable",
-                        "Downloads (exact)": "-", "Downloads (range)": "-",
-                        "Reviews": "-", "Rating": "-", "Chart Info (raw)": "-",
-                    })
-
-                progress.progress((i + 1) / len(codes))
-
-            status_text.empty()
-            st.session_state.country_details_rows = rows
-            st.session_state.country_details_package = package_name
-
-    if st.session_state.get("country_details_rows"):
-        st.markdown(f"### Results for `{st.session_state.country_details_package}`")
-        st.caption("The 'Chart Info (raw)' column is shown as-is since its structure is unverified — check a few rows and let me know what ranking data (if any) appears there so I can format it properly.")
-        st.dataframe(st.session_state.country_details_rows, use_container_width=True, hide_index=True)
 
 with tab2:
     st.subheader("Watched developers")
