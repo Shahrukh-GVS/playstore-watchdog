@@ -179,24 +179,38 @@ def check_app_directly(package_name, last_status, last_seen_iso):
 
 
 def send_discord(embeds):
+    """Returns True if all sends succeeded (or no webhook configured)."""
     if not DISCORD_WEBHOOK_URL:
-        return
+        return True
+    ok = True
     for i in range(0, len(embeds), 10):
         batch = embeds[i:i + 10]
         try:
-            requests.post(DISCORD_WEBHOOK_URL, json={"embeds": batch}, timeout=15)
+            resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": batch}, timeout=15)
+            if resp.status_code >= 300:
+                print(f"[warn] Discord returned status {resp.status_code}: {resp.text[:200]}")
+                ok = False
         except Exception as e:
             print(f"[warn] Discord send failed: {e}")
+            ok = False
+    return ok
 
 
 def send_slack(text_blocks):
+    """Returns True if all sends succeeded (or no webhook configured)."""
     if not SLACK_WEBHOOK_URL:
-        return
+        return True
+    ok = True
     for text in text_blocks:
         try:
-            requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=15)
+            resp = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=15)
+            if resp.status_code >= 300:
+                print(f"[warn] Slack returned status {resp.status_code}: {resp.text[:200]}")
+                ok = False
         except Exception as e:
             print(f"[warn] Slack send failed: {e}")
+            ok = False
+    return ok
 
 
 def play_link(package_name):
@@ -215,7 +229,7 @@ def send_digest(events):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }])
         send_slack([f":white_check_mark: *My Accounts check complete* — nothing new this cycle ({now_str})"])
-        return
+        return True
 
     embeds = []
     slack_texts = []
@@ -256,12 +270,14 @@ def send_digest(events):
         })
         slack_texts.append(f":art: Listing changed: *{ev['new_title']}* ({ev['developer_name']}) — " + "; ".join(lines))
 
-    send_discord(embeds)
-    send_slack(slack_texts)
+    discord_ok = send_discord(embeds)
+    slack_ok = send_slack(slack_texts)
+    return discord_ok and slack_ok
 
 
 def main():
     events = {"new_upload": [], "removed": [], "listing_changed": []}
+    pending_removals = []
 
     developers_resp = supabase.table("developers").select("*").eq("source", "own_account").execute()
     developers = {d["id"]: d for d in developers_resp.data}
@@ -377,14 +393,19 @@ def main():
                 events["removed"].append({
                     "package_name": package_name, "title": stored["title"], "developer_name": dev_name,
                 })
-                supabase.table("change_log").insert({
-                    "app_id": stored["id"], "developer_id": stored["developer_id"], "event_type": "removed",
-                    "old_value": {"title": stored["title"]}, "new_value": None,
-                    "developer_name": dev_name, "app_title": stored["title"], "package_name": package_name,
-                }).execute()
-            supabase.table("apps").update({
-                "status": "removed", "last_seen": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", stored["id"]).execute()
+                # Defer the DB status change until AFTER notifications are sent.
+                # Otherwise a failed/interrupted notification would leave the app
+                # marked 'removed' in the DB, and the next run would see no change
+                # and never alert — silently losing the notification forever.
+                pending_removals.append({
+                    "app_id": stored["id"], "developer_id": stored["developer_id"],
+                    "title": stored["title"], "package_name": package_name, "dev_name": dev_name,
+                })
+            else:
+                # Already known-removed: just refresh the timestamp
+                supabase.table("apps").update({
+                    "last_seen": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", stored["id"]).execute()
             continue
 
         if result == "found":
@@ -393,7 +414,29 @@ def main():
                 "status": "active", "last_seen": datetime.now(timezone.utc).isoformat(),
             }).eq("id", stored["id"]).execute()
 
-    send_digest(events)
+    # Send notifications FIRST — only mark removals in the DB once alerts
+    # have actually gone out, so a failed send doesn't silently swallow them.
+    notified_ok = send_digest(events)
+
+    if pending_removals and not notified_ok:
+        print("[warn] Notification delivery failed — NOT marking removals in DB. "
+              "They will be re-detected and re-alerted on the next run.")
+        print("[info] Own accounts check complete (with notification errors).")
+        return
+
+    for pr in pending_removals:
+        supabase.table("change_log").insert({
+            "app_id": pr["app_id"], "developer_id": pr["developer_id"], "event_type": "removed",
+            "old_value": {"title": pr["title"]}, "new_value": None,
+            "developer_name": pr["dev_name"], "app_title": pr["title"], "package_name": pr["package_name"],
+        }).execute()
+        supabase.table("apps").update({
+            "status": "removed", "last_seen": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", pr["app_id"]).execute()
+
+    if pending_removals:
+        print(f"[info] Committed {len(pending_removals)} removal(s) after notification.")
+
     print("[info] Own accounts check complete.")
 
 
