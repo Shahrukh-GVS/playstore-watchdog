@@ -159,14 +159,24 @@ def parse_app_ads_lines(raw_text):
 
 
 def get_known_ids():
-    result = supabase.table("ad_network_ids").select("account_id").execute()
-    return {row["account_id"] for row in result.data}
+    """Returns {account_id: {"studio_id": ..., "studio_name": ...}} for matching."""
+    result = supabase.table("ad_network_ids").select("account_id, studio_id").execute()
+    studios = {s["id"]: s["name"] for s in supabase.table("studios").select("id, name").execute().data}
+    return {
+        row["account_id"]: {
+            "studio_id": row.get("studio_id"),
+            "studio_name": studios.get(row.get("studio_id"), "Unassigned"),
+        }
+        for row in result.data
+    }
 
 
 def find_match(ads_lines, known_ids):
+    """Returns (domain, account_id, relationship, studio_id, studio_name) or None."""
     for domain, account_id, relationship in ads_lines:
         if account_id in known_ids and relationship.upper() == "DIRECT":
-            return (domain, account_id, relationship)
+            info = known_ids[account_id]
+            return (domain, account_id, relationship, info["studio_id"], info["studio_name"])
     return None
 
 
@@ -235,14 +245,18 @@ def fetch_developer_catalog(dev_link, developer_name=None):
     return apps
 
 
-def upsert_developer(dev_name, dev_link):
+def upsert_developer(dev_name, dev_link, studio_id=None):
     m = re.search(r"[?&]id=([a-zA-Z0-9._+-]+)", dev_link)
     dev_id = m.group(1) if m else dev_link
     existing = supabase.table("developers").select("id").eq("dev_id", dev_id).execute()
     if existing.data:
-        return existing.data[0]["id"]
+        developer_id = existing.data[0]["id"]
+        if studio_id:
+            supabase.table("developers").update({"studio_id": studio_id}).eq("id", developer_id).execute()
+        return developer_id
     result = supabase.table("developers").insert({
-        "dev_id": dev_id, "name": dev_name, "developer_url": dev_link, "source": "trace",
+        "dev_id": dev_id, "name": dev_name, "developer_url": dev_link,
+        "source": "trace", "studio_id": studio_id,
     }).execute()
     return result.data[0]["id"]
 
@@ -440,7 +454,7 @@ def run_trace(url):
     if not match:
         return {"status": "no_match", "message": f"No known ad IDs matched (DIRECT) for `{package_name}`."}
 
-    domain, account_id, relationship = match
+    domain, account_id, relationship, studio_id, studio_name = match
     dev_name, dev_link = extract_developer_info(soup)
     if not dev_link:
         return {"status": "error", "message": "Match found but could not extract developer page link."}
@@ -450,23 +464,25 @@ def run_trace(url):
     existing_dev_check = supabase.table("developers").select("id").eq("dev_id", dev_id_str).execute()
     already_existed = bool(existing_dev_check.data)
 
-    developer_id = upsert_developer(dev_name, dev_link)
+    developer_id = upsert_developer(dev_name, dev_link, studio_id=studio_id)
     catalog = fetch_developer_catalog(dev_link, developer_name=dev_name)
     inserted = insert_apps(developer_id, catalog)
 
     if already_existed:
         return {
             "status": "already_exists",
-            "message": f"**{dev_name}** is already in your watchlist. {len(catalog)} apps found, {inserted} newly added (if any new games were released).",
+            "message": f"**{dev_name}** is already in your watchlist (Studio: **{studio_name}**). {len(catalog)} apps found, {inserted} newly added (if any new games were released).",
             "matched_id": account_id,
             "domain": domain,
+            "studio_name": studio_name,
         }
 
     return {
         "status": "match",
-        "message": f"Match confirmed — **{dev_name}** added. {len(catalog)} apps found, {inserted} newly added.",
+        "message": f"Match confirmed — **{dev_name}** added under Studio **{studio_name}**. {len(catalog)} apps found, {inserted} newly added.",
         "matched_id": account_id,
         "domain": domain,
+        "studio_name": studio_name,
     }
 
 
@@ -820,7 +836,15 @@ with tab2:
     developers = supabase.table("developers").select("*").neq("source", "own_account").order("first_seen", desc=True).execute().data
     apps_all = supabase.table("apps").select("*").execute().data
 
-    title_search = st.text_input("🔍 Search by game title", key="watchlist_title_search", placeholder="Type to filter games by name...")
+    watchlist_studios = {s["id"]: s["name"] for s in supabase.table("studios").select("id, name").execute().data}
+
+    fcol1, fcol2 = st.columns(2)
+    title_search = fcol1.text_input("🔍 Search by game title", key="watchlist_title_search", placeholder="Type to filter games by name...")
+    studio_filter = fcol2.selectbox(
+        "🏷️ Filter by studio",
+        ["All studios"] + sorted(watchlist_studios.values()) + ["Unassigned"],
+        key="watchlist_studio_filter",
+    )
 
     if recheck_clicked:
         known_ids = get_known_ids()
@@ -907,6 +931,10 @@ with tab2:
     any_match_shown = False
 
     for dev in developers:
+        dev_studio_label = watchlist_studios.get(dev.get("studio_id"), "Unassigned")
+        if studio_filter != "All studios" and dev_studio_label != studio_filter:
+            continue
+
         dev_apps = [a for a in apps_all if a["developer_id"] == dev["id"]]
 
         if title_search.strip():
@@ -917,10 +945,11 @@ with tab2:
         any_match_shown = True
         active_count = len([a for a in dev_apps if a["status"] == "active"])
         removed_count = len([a for a in dev_apps if a["status"] == "removed"])
+        studio_label = watchlist_studios.get(dev.get("studio_id"), "Unassigned")
 
-        with st.expander(f"**{dev['name']}** — {active_count} active, {removed_count} removed ({len(dev_apps)} total)"):
+        with st.expander(f"**{dev['name']}** [{studio_label}] — {active_count} active, {removed_count} removed ({len(dev_apps)} total)"):
             st.caption(f"Developer page: {dev['developer_url']}")
-            st.caption(f"Source: {dev.get('source', 'unknown')} | Last checked: {dev.get('last_checked', 'never')}")
+            st.caption(f"Studio: {studio_label} | Source: {dev.get('source', 'unknown')} | Last checked: {dev.get('last_checked', 'never')}")
 
             if dev_apps:
                 table_data = [{
@@ -1109,91 +1138,169 @@ with tab3:
 
 # --- Tab 4: Manage Ad IDs ---
 with tab4:
-    st.subheader("Add a new ad network ID")
-    st.caption("These are the IDs used to match against app-ads.txt during tracing (exact ID + DIRECT relationship required).")
+    st.subheader("Studios")
+    st.caption("Group your tracked ad network IDs by studio. Each traced account gets tagged with the studio whose ID matched.")
 
-    with st.form("add_id_form", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            network_input = st.text_input("Network domain (e.g. google.com, applovin.com, facebook.com)")
-        with col2:
-            account_id_input = st.text_input("Account ID (e.g. pub-1234567890123456, or the raw ID)")
-        label_input = st.text_input("Label (optional note, e.g. 'Main AdMob account')")
+    studios = supabase.table("studios").select("*").order("name").execute().data
+    studio_by_id = {s["id"]: s["name"] for s in studios}
 
-        submitted = st.form_submit_button("Add ID", type="primary")
-
-        if submitted:
-            if not network_input.strip() or not account_id_input.strip():
-                st.warning("Both network and account ID are required.")
-            else:
-                try:
-                    existing = supabase.table("ad_network_ids") \
-                        .select("id") \
-                        .eq("network", network_input.strip()) \
-                        .eq("account_id", account_id_input.strip()) \
-                        .execute()
-                    if existing.data:
-                        st.info("This network + ID combination is already saved.")
+    with st.expander("➕ Add a new studio"):
+        with st.form("add_studio_form", clear_on_submit=True):
+            new_studio_name = st.text_input("Studio name")
+            new_studio_notes = st.text_input("Notes (optional)")
+            if st.form_submit_button("Create studio", type="primary"):
+                if not new_studio_name.strip():
+                    st.warning("Studio name is required.")
+                else:
+                    existing_studio = supabase.table("studios").select("id").eq("name", new_studio_name.strip()).execute()
+                    if existing_studio.data:
+                        st.warning(f"A studio named '{new_studio_name.strip()}' already exists.")
                     else:
-                        supabase.table("ad_network_ids").insert({
-                            "network": network_input.strip(),
-                            "account_id": account_id_input.strip(),
-                            "label": label_input.strip() or None,
+                        supabase.table("studios").insert({
+                            "name": new_studio_name.strip(),
+                            "notes": new_studio_notes.strip() or None,
                         }).execute()
-                        st.success(f"Added `{account_id_input.strip()}` under `{network_input.strip()}`.")
-                except Exception as e:
-                    st.error(f"Failed to add ID: {e}")
+                        st.success(f"Studio '{new_studio_name.strip()}' created.")
+                        st.rerun()
 
-    st.divider()
-    st.subheader("Currently tracked ad network IDs")
-
-    ids_data = supabase.table("ad_network_ids").select("*").order("id", desc=True).execute().data
-
-    if not ids_data:
-        st.info("No ad network IDs added yet.")
+    if not studios:
+        st.info("No studios yet. Create one above before adding ad IDs.")
     else:
+        st.markdown("---")
+        st.subheader("Add a new ad network ID")
+        st.caption("IDs must be globally unique — if an ID already exists under any studio, it won't be added again.")
+
+        with st.form("add_id_form", clear_on_submit=True):
+            studio_choice = st.selectbox(
+                "Studio", [s["name"] for s in studios], key="add_id_studio_select"
+            )
+            col1, col2 = st.columns(2)
+            with col1:
+                network_input = st.text_input("Network domain (e.g. google.com, applovin.com)")
+            with col2:
+                account_id_input = st.text_input("Account ID (e.g. pub-1234567890123456)")
+            label_input = st.text_input("Label (optional note)")
+
+            if st.form_submit_button("Add ID", type="primary"):
+                if not network_input.strip() or not account_id_input.strip():
+                    st.warning("Both network and account ID are required.")
+                else:
+                    account_id_clean = account_id_input.strip()
+                    existing = supabase.table("ad_network_ids").select(
+                        "id, network, studio_id"
+                    ).eq("account_id", account_id_clean).execute()
+
+                    if existing.data:
+                        owner_studio_id = existing.data[0].get("studio_id")
+                        owner_studio = studio_by_id.get(owner_studio_id, "Unassigned")
+                        existing_network = existing.data[0].get("network")
+                        st.error(
+                            f"❌ **Already exists** — `{account_id_clean}` is already tracked "
+                            f"under studio **{owner_studio}** (network: `{existing_network}`). "
+                            f"IDs must be unique across all studios."
+                        )
+                    else:
+                        target_studio_id = next(s["id"] for s in studios if s["name"] == studio_choice)
+                        try:
+                            supabase.table("ad_network_ids").insert({
+                                "network": network_input.strip(),
+                                "account_id": account_id_clean,
+                                "label": label_input.strip() or None,
+                                "studio_id": target_studio_id,
+                            }).execute()
+                            st.success(f"Added `{account_id_clean}` under studio **{studio_choice}**.")
+                        except Exception as e:
+                            st.error(f"Failed to add ID: {e}")
+
+        st.markdown("---")
+        st.subheader("Tracked ad network IDs by studio")
+
+        all_ids = supabase.table("ad_network_ids").select("*").order("id", desc=True).execute().data
+        all_developers = supabase.table("developers").select("id, name, studio_id").execute().data
+
         if "editing_id" not in st.session_state:
             st.session_state.editing_id = None
 
-        for row in ids_data:
-            if st.session_state.editing_id == row["id"]:
-                # Edit mode for this row
-                with st.form(f"edit_form_{row['id']}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        new_network = st.text_input("Network", value=row["network"])
-                    with col2:
-                        new_account_id = st.text_input("Account ID", value=row["account_id"])
-                    new_label = st.text_input("Label", value=row.get("label") or "")
+        for studio in studios:
+            studio_ids = [r for r in all_ids if r.get("studio_id") == studio["id"]]
+            studio_devs = [d for d in all_developers if d.get("studio_id") == studio["id"]]
 
-                    save_col, cancel_col = st.columns(2)
-                    save_clicked = save_col.form_submit_button("Save", type="primary")
-                    cancel_clicked = cancel_col.form_submit_button("Cancel")
+            with st.expander(
+                f"**{studio['name']}** — {len(studio_ids)} ad ID(s), {len(studio_devs)} tracked account(s)"
+            ):
+                if studio.get("notes"):
+                    st.caption(studio["notes"])
 
-                    if save_clicked:
-                        if not new_network.strip() or not new_account_id.strip():
-                            st.warning("Network and Account ID cannot be empty.")
+                if not studio_ids:
+                    st.write("No ad IDs assigned to this studio yet.")
+                else:
+                    for row in studio_ids:
+                        if st.session_state.editing_id == row["id"]:
+                            with st.form(f"edit_form_{row['id']}"):
+                                ecol1, ecol2 = st.columns(2)
+                                with ecol1:
+                                    new_network = st.text_input("Network", value=row["network"])
+                                with ecol2:
+                                    new_account_id = st.text_input("Account ID", value=row["account_id"])
+                                new_label = st.text_input("Label", value=row.get("label") or "")
+                                new_studio_for_id = st.selectbox(
+                                    "Studio", [s["name"] for s in studios],
+                                    index=[s["name"] for s in studios].index(studio["name"]),
+                                )
+
+                                save_col, cancel_col = st.columns(2)
+                                save_clicked = save_col.form_submit_button("Save", type="primary")
+                                cancel_clicked = cancel_col.form_submit_button("Cancel")
+
+                                if save_clicked:
+                                    if not new_network.strip() or not new_account_id.strip():
+                                        st.warning("Network and Account ID cannot be empty.")
+                                    else:
+                                        clash = supabase.table("ad_network_ids").select("id, studio_id").eq(
+                                            "account_id", new_account_id.strip()
+                                        ).neq("id", row["id"]).execute()
+                                        if clash.data:
+                                            clash_studio = studio_by_id.get(clash.data[0].get("studio_id"), "Unassigned")
+                                            st.error(f"`{new_account_id.strip()}` already exists under studio **{clash_studio}**.")
+                                        else:
+                                            target_sid = next(s["id"] for s in studios if s["name"] == new_studio_for_id)
+                                            supabase.table("ad_network_ids").update({
+                                                "network": new_network.strip(),
+                                                "account_id": new_account_id.strip(),
+                                                "label": new_label.strip() or None,
+                                                "studio_id": target_sid,
+                                            }).eq("id", row["id"]).execute()
+                                            st.session_state.editing_id = None
+                                            st.rerun()
+
+                                if cancel_clicked:
+                                    st.session_state.editing_id = None
+                                    st.rerun()
                         else:
-                            supabase.table("ad_network_ids").update({
-                                "network": new_network.strip(),
-                                "account_id": new_account_id.strip(),
-                                "label": new_label.strip() or None,
-                            }).eq("id", row["id"]).execute()
-                            st.session_state.editing_id = None
-                            st.rerun()
+                            c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 1, 1])
+                            c1.write(row["network"])
+                            c2.code(row["account_id"])
+                            c3.write(row.get("label") or "-")
+                            if c4.button("Edit", key=f"edit_{row['id']}"):
+                                st.session_state.editing_id = row["id"]
+                                st.rerun()
+                            if c5.button("Delete", key=f"del_{row['id']}"):
+                                supabase.table("ad_network_ids").delete().eq("id", row["id"]).execute()
+                                st.rerun()
 
-                    if cancel_clicked:
-                        st.session_state.editing_id = None
+                if studio_devs:
+                    st.markdown("**Tracked accounts under this studio:**")
+                    for d in studio_devs:
+                        st.write(f"- {d['name']}")
+
+        unassigned_ids = [r for r in all_ids if not r.get("studio_id")]
+        if unassigned_ids:
+            with st.expander(f"⚠️ Unassigned IDs ({len(unassigned_ids)})"):
+                st.caption("These IDs aren't linked to any studio. Use Edit to assign them.")
+                for row in unassigned_ids:
+                    uc1, uc2, uc3 = st.columns([2, 3, 1])
+                    uc1.write(row["network"])
+                    uc2.code(row["account_id"])
+                    if uc3.button("Edit", key=f"unassigned_edit_{row['id']}"):
+                        st.session_state.editing_id = row["id"]
                         st.rerun()
-            else:
-                # Normal display row
-                col1, col2, col3, col4, col5 = st.columns([2, 3, 2, 1, 1])
-                col1.write(row["network"])
-                col2.code(row["account_id"])
-                col3.write(row.get("label") or "-")
-                if col4.button("Edit", key=f"edit_{row['id']}"):
-                    st.session_state.editing_id = row["id"]
-                    st.rerun()
-                if col5.button("Delete", key=f"del_{row['id']}"):
-                    supabase.table("ad_network_ids").delete().eq("id", row["id"]).execute()
-                    st.rerun()

@@ -287,48 +287,48 @@ def send_digest(events, run_id=None):
         embed = {
             "title": f"New upload: {ev['title']}",
             "url": link,
-            "description": f"Package: `{ev['package_name']}`\nDeveloper: {ev['developer_name']}\n[Open on Play Store]({link})",
+            "description": f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nDeveloper: {ev['developer_name']}\n[Open on Play Store]({link})",
             "color": COLOR_NEW,
         }
         if ev.get("icon_url"):
             embed["thumbnail"] = {"url": ev["icon_url"]}
         embeds.append(embed)
-        slack_texts.append(f":new: New upload: *{ev['title']}* ({ev['developer_name']}) — <{link}|Open>")
+        slack_texts.append(f":new: [{ev.get('studio_name', 'Unassigned')}] New upload: *{ev['title']}* ({ev['developer_name']}) — <{link}|Open>")
 
     for ev in events.get("transferred_in", []):
         link = play_link(ev["package_name"])
         embed = {
             "title": f"Transferred in (already has installs): {ev['title']}",
             "url": link,
-            "description": (f"Package: `{ev['package_name']}`\nNow under: {ev['developer_name']}\n"
+            "description": (f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nNow under: {ev['developer_name']}\n"
                              f"Origin: {ev.get('origin', 'unknown')}\n[Open on Play Store]({link})"),
             "color": COLOR_TRANSFER,
         }
         if ev.get("icon_url"):
             embed["thumbnail"] = {"url": ev["icon_url"]}
         embeds.append(embed)
-        slack_texts.append(f":inbox_tray: Transferred in: *{ev['title']}* → {ev['developer_name']} — <{link}|Open>")
+        slack_texts.append(f":inbox_tray: [{ev.get('studio_name', 'Unassigned')}] Transferred in: *{ev['title']}* → {ev['developer_name']} — <{link}|Open>")
 
     for ev in events.get("transferred", []):
         link = play_link(ev["package_name"])
         embeds.append({
             "title": f"Transferred: {ev['title']}",
             "url": link,
-            "description": (f"Package: `{ev['package_name']}`\nFrom: {ev['old_dev']}\nTo: {ev['new_dev']}\n"
+            "description": (f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nFrom: {ev['old_dev']}\nTo: {ev['new_dev']}\n"
                              f"[Open on Play Store]({link})"),
             "color": COLOR_TRANSFER,
         })
-        slack_texts.append(f":twisted_rightwards_arrows: Transferred: *{ev['title']}* — {ev['old_dev']} → {ev['new_dev']} — <{link}|Open>")
+        slack_texts.append(f":twisted_rightwards_arrows: [{ev.get('studio_name', 'Unassigned')}] Transferred: *{ev['title']}* — {ev['old_dev']} → {ev['new_dev']} — <{link}|Open>")
 
     for ev in events.get("removed", []):
         link = play_link(ev["package_name"])
         embeds.append({
             "title": f"Removed: {ev['title']}",
-            "description": (f"Package: `{ev['package_name']}`\nLast known developer: {ev['developer_name']}\n"
+            "description": (f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nLast known developer: {ev['developer_name']}\n"
                              f"[Last known Play Store link]({link}) (likely dead now)"),
             "color": COLOR_REMOVED,
         })
-        slack_texts.append(f":wastebasket: Removed: *{ev['title']}* ({ev['developer_name']}) — <{link}|Last known link>")
+        slack_texts.append(f":wastebasket: [{ev.get('studio_name', 'Unassigned')}] Removed: *{ev['title']}* ({ev['developer_name']}) — <{link}|Last known link>")
 
     for ev in events.get("listing_changed", []):
         link = play_link(ev["package_name"])
@@ -343,6 +343,7 @@ def send_digest(events, run_id=None):
         desc_lines.append(f"Package: `{ev['package_name']}`")
         desc_lines.append(f"[Open on Play Store]({link})")
 
+        desc_lines.insert(0, f"Studio: **{ev.get('studio_name', 'Unassigned')}**")
         embed = {"title": "Listing changed", "url": link, "description": "\n".join(desc_lines), "color": COLOR_LISTING}
         if ev.get("icon_changed"):
             if ev.get("old_icon_url"):
@@ -350,7 +351,7 @@ def send_digest(events, run_id=None):
             if ev.get("new_icon_url"):
                 embed["image"] = {"url": ev["new_icon_url"]}
         embeds.append(embed)
-        slack_texts.append(f":art: Listing changed — " + "; ".join(slack_lines) + f" — <{link}|Open>")
+        slack_texts.append(f":art: [{ev.get('studio_name', 'Unassigned')}] Listing changed — " + "; ".join(slack_lines) + f" — <{link}|Open>")
 
     if footer and embeds:
         embeds[-1]["footer"] = footer
@@ -399,11 +400,15 @@ def main():
         "removed": [], "listing_changed": [],
     }
 
-    developers_resp = supabase.table("developers").select("*").execute()
+    developers_resp = supabase.table("developers").select("*").neq("source", "own_account").execute()
     developers = {d["id"]: d for d in developers_resp.data}
 
+    studios_lookup = {s["id"]: s["name"] for s in supabase.table("studios").select("id, name").execute().data}
+    for d in developers.values():
+        d["studio_name"] = studios_lookup.get(d.get("studio_id"), "Unassigned")
+
     apps_resp = supabase.table("apps").select("*").execute()
-    db_apps = {a["package_name"]: a for a in apps_resp.data}
+    db_apps = {a["package_name"]: a for a in apps_resp.data if a["developer_id"] in developers}
 
     fresh_map = {}
 
@@ -417,6 +422,7 @@ def main():
             fresh_map[app["package_name"]] = {
                 "developer_id": dev_id,
                 "developer_name": dev["name"],
+                "studio_name": dev.get("studio_name", "Unassigned"),
                 "title": app["title"],
                 "icon_url": app["icon_url"],
             }
@@ -449,19 +455,19 @@ def main():
             if is_pre_reg:
                 events["new_upload"].append({
                     "package_name": package_name, "title": final_title,
-                    "developer_name": fresh["developer_name"], "icon_url": fresh["icon_url"],
+                    "developer_name": fresh["developer_name"], "studio_name": fresh.get("studio_name", "Unassigned"), "icon_url": fresh["icon_url"],
                 })
                 log_change(new_app_id, fresh["developer_id"], "new_upload", None, {"title": final_title},
-                           run_id=run_id, developer_name=fresh["developer_name"],
+                           run_id=run_id, developer_name=f"[{fresh.get('studio_name', 'Unassigned')}] {fresh['developer_name']}",
                            app_title=final_title, package_name=package_name)
             else:
                 events["transferred_in"].append({
                     "package_name": package_name, "title": final_title,
-                    "developer_name": fresh["developer_name"], "icon_url": fresh["icon_url"],
+                    "developer_name": fresh["developer_name"], "studio_name": fresh.get("studio_name", "Unassigned"), "icon_url": fresh["icon_url"],
                     "origin": "unknown",
                 })
                 log_change(new_app_id, fresh["developer_id"], "transferred_in", None, {"title": final_title},
-                           run_id=run_id, developer_name=fresh["developer_name"],
+                           run_id=run_id, developer_name=f"[{fresh.get('studio_name', 'Unassigned')}] {fresh['developer_name']}",
                            app_title=final_title, package_name=package_name)
             continue
 
@@ -475,6 +481,7 @@ def main():
             }).eq("id", stored["id"]).execute()
             events["transferred"].append({
                 "package_name": package_name, "title": fresh["title"],
+                "studio_name": fresh.get("studio_name", "Unassigned"),
                 "old_dev": old_dev_name, "new_dev": new_dev_name,
             })
             log_change(stored["id"], fresh["developer_id"], "transferred",
@@ -521,13 +528,14 @@ def main():
 
             events["listing_changed"].append({
                 "package_name": package_name,
+                "studio_name": fresh.get("studio_name", "Unassigned"),
                 "title_changed": title_changed,
                 "icon_changed": icon_changed,
                 "old_title": stored["title"], "new_title": confirmed_new_title,
                 "old_icon_url": stored.get("icon_url"), "new_icon_url": fresh["icon_url"],
             })
             log_change(stored["id"], fresh["developer_id"], "listing_changed", old_value, new_value,
-                       run_id=run_id, developer_name=fresh["developer_name"],
+                       run_id=run_id, developer_name=f"[{fresh.get('studio_name', 'Unassigned')}] {fresh['developer_name']}",
                        app_title=confirmed_new_title, package_name=package_name)
             if title_changed:
                 update_fields["title"] = confirmed_new_title
@@ -555,10 +563,11 @@ def main():
                 dev_name = developers.get(stored["developer_id"], {}).get("name", "unknown")
                 events["removed"].append({
                     "package_name": package_name, "title": stored["title"], "developer_name": dev_name,
+                    "studio_name": developers.get(stored["developer_id"], {}).get("studio_name", "Unassigned"),
                 })
                 log_change(stored["id"], stored["developer_id"], "removed",
                            {"title": stored["title"]}, None,
-                           run_id=run_id, developer_name=dev_name,
+                           run_id=run_id, developer_name=f"[{developers.get(stored['developer_id'], {}).get('studio_name', 'Unassigned')}] {dev_name}",
                            app_title=stored["title"], package_name=package_name)
             supabase.table("apps").update({
                 "status": "removed",
@@ -616,7 +625,7 @@ def main():
             })
             log_change(stored["id"], new_developer_id, "transferred",
                        {"developer": old_dev.get("name", "unknown")}, {"developer": dev_name},
-                       run_id=run_id, developer_name=dev_name,
+                       run_id=run_id, developer_name=f"[{developers.get(stored['developer_id'], {}).get('studio_name', 'Unassigned')}] {dev_name}",
                        app_title=stored["title"], package_name=package_name)
 
     send_digest(events, run_id)
