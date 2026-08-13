@@ -16,6 +16,7 @@ Three tabs:
 import os
 import re
 import urllib.parse
+import title_finder
 from datetime import datetime, timezone, timedelta
 import requests
 import streamlit as st
@@ -492,8 +493,8 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab_search, tab_mine, tab2, tab_short, tab3, tab4 = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🏢 My Accounts",
+tab1, tab_spy, tab_search, tab_titles, tab_mine, tab2, tab_short, tab3, tab4 = st.tabs(
+    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "✍️ Title Finder", "🏢 My Accounts",
      "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
 )
 
@@ -741,6 +742,10 @@ with tab_search:
             )
             if match_details:
                 st.write("\n".join(match_details))
+
+# --- Tab: Title Finder ---
+with tab_titles:
+    title_finder.render(supabase, APPSTORESPY_API_KEY)
 
 # --- Tab: My Accounts ---
 with tab_mine:
