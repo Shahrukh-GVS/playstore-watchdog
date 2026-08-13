@@ -179,7 +179,7 @@ def _headers(api_key):
 
 
 def search_top_apps(api_key, query, country="US", lang="en_US", limit=9,
-                    poll_timeout=90):
+                    poll_timeout=25, debug=None):
     """
     Real Play SERP for `query`, in rank order.
     -> [{"package_id", "title", "position"}]
@@ -187,6 +187,9 @@ def search_top_apps(api_key, query, country="US", lang="en_US", limit=9,
     Uses the async jobs endpoint: create the search, then poll until the crawl
     lands. A brand-new term will take a few seconds; repeats are served from
     AppstoreSpy's own cache immediately.
+
+    `debug` may be a list — raw request/response summaries get appended to it
+    so the UI can show what actually came back.
     """
     if not api_key:
         raise TitleFinderError(
@@ -205,10 +208,16 @@ def search_top_apps(api_key, query, country="US", lang="en_US", limit=9,
     try:
         resp = requests.post(
             f"{API_BASE}/jobs/search", json=payload,
-            headers=_headers(api_key), timeout=30,
+            headers=_headers(api_key), timeout=20,
         )
     except Exception as e:
         raise TitleFinderError(f"Search request failed for '{query}': {e}")
+
+    if debug is not None:
+        debug.append({
+            "step": "POST /jobs/search", "query": query,
+            "status": resp.status_code, "body": resp.text[:600],
+        })
 
     if resp.status_code == 403:
         raise TitleFinderError("AppstoreSpy rejected the API key (403 Forbidden).")
@@ -219,22 +228,30 @@ def search_top_apps(api_key, query, country="US", lang="en_US", limit=9,
             f"Search failed for '{query}' — HTTP {resp.status_code}: {resp.text[:300]}"
         )
 
-    body = resp.json() if resp.content else {}
-    search_id = body.get("id")
+    try:
+        body = resp.json() if resp.content else {}
+    except Exception:
+        raise TitleFinderError(
+            f"Search for '{query}' returned non-JSON: {resp.text[:300]}"
+        )
+
+    search_id = body.get("id") if isinstance(body, dict) else None
     packages = _packages_from_search_result(body)
 
     # Poll until the crawl produces results
     deadline = time.time() + poll_timeout
     delay = 2
+    polls = 0
     while not packages and time.time() < deadline:
         time.sleep(delay)
-        delay = min(delay * 1.5, 10)
+        delay = min(delay * 1.5, 8)
+        polls += 1
         try:
             poll = requests.get(
                 f"{API_BASE}/jobs/search",
                 params={"store": "play", "term": query, "country": country,
                         **({"search_id": search_id} if search_id else {})},
-                headers=_headers(api_key), timeout=30,
+                headers=_headers(api_key), timeout=20,
             )
         except Exception as e:
             raise TitleFinderError(f"Polling failed for '{query}': {e}")
@@ -244,7 +261,17 @@ def search_top_apps(api_key, query, country="US", lang="en_US", limit=9,
                 f"Polling failed for '{query}' — HTTP {poll.status_code}: {poll.text[:300]}"
             )
 
-        poll_body = poll.json() if poll.content else []
+        try:
+            poll_body = poll.json() if poll.content else []
+        except Exception:
+            poll_body = []
+
+        if debug is not None and polls == 1:
+            debug.append({
+                "step": "GET /jobs/search (poll 1)", "query": query,
+                "status": poll.status_code, "body": poll.text[:600],
+            })
+
         if isinstance(poll_body, list):
             for item in poll_body:
                 packages = _packages_from_search_result(item)
@@ -255,8 +282,9 @@ def search_top_apps(api_key, query, country="US", lang="en_US", limit=9,
 
     if not packages:
         raise TitleFinderError(
-            f"No SERP results returned for '{query}' within {poll_timeout}s. "
-            "The crawl may still be running — retry in a minute."
+            f"No SERP results for '{query}' after {poll_timeout}s ({polls} polls). "
+            "Either the crawl is still running, or the response shape isn't what "
+            "we expect — check the Debug panel below for the raw response."
         )
 
     return [
@@ -345,7 +373,7 @@ def _fresh(fetched_at_iso, ttl_days):
         return False
 
 
-def cached_serp(supabase, api_key, query, country, lang, limit, stats):
+def cached_serp(supabase, api_key, query, country, lang, limit, stats, debug=None):
     try:
         row = supabase.table("serp_cache").select("*") \
             .eq("query", query).eq("country", country).execute().data
@@ -355,7 +383,7 @@ def cached_serp(supabase, api_key, query, country, lang, limit, stats):
     except Exception:
         pass  # cache miss on error — fall through to a live call
 
-    results = search_top_apps(api_key, query, country, lang, limit)
+    results = search_top_apps(api_key, query, country, lang, limit, debug=debug)
     stats["serp_calls"] += 1
     try:
         supabase.table("serp_cache").upsert({
@@ -405,8 +433,8 @@ def cached_app_meta(supabase, api_key, package_id, country, stats):
 # ---------------------------------------------------------------------------
 
 def test_title(supabase, api_key, title, country, lang, top_n, threshold,
-               max_age_days, min_daily_installs, stats):
-    serp = cached_serp(supabase, api_key, title, country, lang, top_n, stats)
+               max_age_days, min_daily_installs, stats, debug=None):
+    serp = cached_serp(supabase, api_key, title, country, lang, top_n, stats, debug=debug)
     cutoff = (datetime.now(timezone.utc).date() - timedelta(days=max_age_days))
 
     rows, hits = [], 0
@@ -512,19 +540,53 @@ def render(supabase, api_key):
     st.caption(f"Up to ~{est} API calls before caching. Repeats across searches are cached, "
                f"so the real figure is usually far lower.")
 
+    st.markdown("---")
+    st.markdown("**Start here:** test one title first to confirm the search endpoint works. "
+                "A batch of 10+ can take several minutes and the page greys out while it runs.")
+
+    diag_title = st.selectbox("Title to diagnose", titles, key="tf_diag_pick")
+    if st.button("🔬 Test this one title", key="tf_diag_run"):
+        stats = {"serp_calls": 0, "serp_hits": 0, "meta_calls": 0, "meta_hits": 0}
+        debug = []
+        with st.spinner(f"Testing '{diag_title}'..."):
+            try:
+                outcome = test_title(
+                    supabase, api_key, diag_title, country, lang,
+                    int(top_n), int(threshold), int(max_age_days),
+                    int(min_installs), stats, debug=debug,
+                )
+                st.success(f"Search worked — {outcome['hits']}/{top_n} hits, "
+                           f"{'PASSED' if outcome['passed'] else 'did not pass'}.")
+                st.dataframe(outcome["rows"], use_container_width=True, hide_index=True)
+            except TitleFinderError as e:
+                st.error(str(e))
+            except Exception as e:
+                st.error(f"Unexpected error: {type(e).__name__}: {e}")
+
+        if debug:
+            with st.expander("🐛 Debug — raw API responses", expanded=True):
+                for d in debug:
+                    st.write(f"**{d['step']}** · HTTP {d['status']}")
+                    st.code(d["body"] or "(empty body)")
+
+    st.markdown("---")
+
     if st.button("Run test", type="primary", key="tf_run") and chosen:
         progress = st.progress(0)
         status = st.empty()
         stats = {"serp_calls": 0, "serp_hits": 0, "meta_calls": 0, "meta_hits": 0}
         results, errors = [], []
+        batch_debug = []
 
         for i, title in enumerate(chosen):
-            status.write(f"Testing **{title}** ({i + 1}/{len(chosen)})")
+            status.write(f"Testing **{title}** ({i + 1}/{len(chosen)}) — "
+                         f"cold searches can take ~20s each, please wait")
             try:
                 outcome = test_title(
                     supabase, api_key, title, country, lang,
                     int(top_n), int(threshold), int(max_age_days),
                     int(min_installs), stats,
+                    debug=batch_debug if i == 0 else None,
                 )
                 score = next((c["bigram_score"] for c in candidates if c["title"] == title), None)
                 results.append({"title": title, "score": score, **outcome})
@@ -550,6 +612,7 @@ def render(supabase, api_key):
         st.session_state.tf_results = results
         st.session_state.tf_errors = errors
         st.session_state.tf_stats = stats
+        st.session_state.tf_debug = batch_debug
 
     results = st.session_state.get("tf_results")
     if results is None:
@@ -557,6 +620,13 @@ def render(supabase, api_key):
 
     for err in st.session_state.get("tf_errors") or []:
         st.error(err)
+
+    batch_debug = st.session_state.get("tf_debug")
+    if batch_debug and st.session_state.get("tf_errors"):
+        with st.expander("🐛 Debug — raw API response from the first search", expanded=True):
+            for d in batch_debug:
+                st.write(f"**{d['step']}** · HTTP {d['status']}")
+                st.code(d["body"] or "(empty body)")
 
     stats = st.session_state.get("tf_stats") or {}
     if stats:
