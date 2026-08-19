@@ -15,6 +15,8 @@ Three tabs:
 
 import os
 import re
+import csv
+import io
 import urllib.parse
 from datetime import datetime, timezone, timedelta
 import requests
@@ -1160,6 +1162,9 @@ with tab4:
 
     studios = supabase.table("studios").select("*").order("name").execute().data
     studio_by_id = {s["id"]: s["name"] for s in studios}
+    # Fetched here (not inside the `else` below) so Import/Export still works
+    # on a fresh account that has no studios yet.
+    all_ids = supabase.table("ad_network_ids").select("*").order("id", desc=True).execute().data
 
     with st.expander("➕ Add a new studio"):
         with st.form("add_studio_form", clear_on_submit=True):
@@ -1232,7 +1237,6 @@ with tab4:
         st.markdown("---")
         st.subheader("Tracked ad network IDs by studio")
 
-        all_ids = supabase.table("ad_network_ids").select("*").order("id", desc=True).execute().data
         all_developers = supabase.table("developers").select("id, name, studio_id").execute().data
 
         if "editing_id" not in st.session_state:
@@ -1321,6 +1325,165 @@ with tab4:
                     if uc3.button("Edit", key=f"unassigned_edit_{row['id']}"):
                         st.session_state.editing_id = row["id"]
                         st.rerun()
+
+
+    # ---- Import / Export ----
+    st.markdown("---")
+    st.subheader("Import / Export")
+    st.caption("Back up your studios and ad IDs, move them between accounts, or "
+               "bulk-add from a spreadsheet.")
+
+    exp_col, imp_col = st.columns(2)
+
+    with exp_col:
+        st.markdown("**Export**")
+        export_rows = []
+        for row in all_ids:
+            export_rows.append({
+                "studio": studio_by_id.get(row.get("studio_id"), ""),
+                "network": row.get("network") or "",
+                "account_id": row.get("account_id") or "",
+                "label": row.get("label") or "",
+            })
+        # Studios with no IDs yet would vanish on a round-trip, so emit a
+        # studio-only row for each to preserve them.
+        studios_with_ids = {r["studio"] for r in export_rows}
+        for s in studios:
+            if s["name"] not in studios_with_ids:
+                export_rows.append({"studio": s["name"], "network": "",
+                                    "account_id": "", "label": ""})
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=["studio", "network", "account_id", "label"])
+        writer.writeheader()
+        writer.writerows(export_rows)
+
+        st.download_button(
+            f"⬇️ Download CSV ({len(all_ids)} IDs, {len(studios)} studios)",
+            data=buf.getvalue(),
+            file_name=f"ad-ids-{datetime.now(PKT).strftime('%Y-%m-%d')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+    with imp_col:
+        st.markdown("**Import**")
+        st.caption("CSV with columns: `studio, network, account_id, label`. "
+                   "Missing studios are created automatically.")
+        uploaded = st.file_uploader("Choose a CSV", type=["csv"], key="adids_import_file")
+
+    if uploaded is not None:
+        try:
+            text = uploaded.getvalue().decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(text))
+            headers = [h.strip().lower() for h in (reader.fieldnames or [])]
+
+            if "account_id" not in headers or "studio" not in headers:
+                st.error("That CSV needs at least a `studio` and an `account_id` column. "
+                         f"Found: {', '.join(headers) or '(none)'}")
+            else:
+                parsed, malformed = [], 0
+                for raw in reader:
+                    row = {(k or "").strip().lower(): (v or "").strip()
+                           for k, v in raw.items()}
+                    studio_name = row.get("studio", "")
+                    account_id = row.get("account_id", "")
+                    if not studio_name:
+                        malformed += 1
+                        continue
+                    parsed.append({
+                        "studio": studio_name,
+                        "network": row.get("network", ""),
+                        "account_id": account_id,
+                        "label": row.get("label", ""),
+                    })
+
+                existing_ids = {r["account_id"]: studio_by_id.get(r.get("studio_id"), "Unassigned")
+                                for r in all_ids}
+                existing_studios = {s["name"].lower(): s["id"] for s in studios}
+
+                to_add, dupes, studio_only, seen_in_file = [], [], [], set()
+                for r in parsed:
+                    if not r["account_id"]:
+                        studio_only.append(r["studio"])
+                        continue
+                    if r["account_id"] in existing_ids:
+                        dupes.append((r["account_id"], existing_ids[r["account_id"]]))
+                    elif r["account_id"] in seen_in_file:
+                        dupes.append((r["account_id"], "duplicated within this file"))
+                    else:
+                        seen_in_file.add(r["account_id"])
+                        to_add.append(r)
+
+                new_studios = sorted({r["studio"] for r in parsed
+                                      if r["studio"].lower() not in existing_studios})
+
+                st.markdown("**Preview**")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Will be added", len(to_add))
+                m2.metric("Skipped (already exist)", len(dupes))
+                m3.metric("New studios", len(new_studios))
+
+                if malformed:
+                    st.warning(f"{malformed} row(s) had no studio name and will be ignored.")
+                if new_studios:
+                    st.info("Studios to create: " + ", ".join(new_studios))
+                if dupes:
+                    with st.expander(f"Skipped IDs ({len(dupes)})"):
+                        st.dataframe(
+                            [{"Account ID": a, "Already in": s} for a, s in dupes],
+                            use_container_width=True, hide_index=True,
+                        )
+                if to_add:
+                    with st.expander(f"IDs to add ({len(to_add)})", expanded=True):
+                        st.dataframe(
+                            [{"Studio": r["studio"], "Network": r["network"],
+                              "Account ID": r["account_id"], "Label": r["label"]}
+                             for r in to_add],
+                            use_container_width=True, hide_index=True,
+                        )
+
+                if to_add or new_studios:
+                    if st.button("✅ Confirm import", type="primary", key="adids_confirm_import"):
+                        created_studios, added, failed = 0, 0, []
+                        studio_ids = dict(existing_studios)
+
+                        for name in new_studios:
+                            try:
+                                res = supabase.table("studios").insert({"name": name}).execute()
+                                studio_ids[name.lower()] = res.data[0]["id"]
+                                created_studios += 1
+                            except Exception as e:
+                                failed.append(f"studio '{name}': {e}")
+
+                        for r in to_add:
+                            sid = studio_ids.get(r["studio"].lower())
+                            if not sid:
+                                failed.append(f"{r['account_id']}: studio missing")
+                                continue
+                            try:
+                                supabase.table("ad_network_ids").insert({
+                                    "network": r["network"] or "unverified",
+                                    "account_id": r["account_id"],
+                                    "label": r["label"] or None,
+                                    "studio_id": sid,
+                                }).execute()
+                                added += 1
+                            except Exception as e:
+                                failed.append(f"{r['account_id']}: {e}")
+
+                        st.success(f"Imported {added} ID(s) and created {created_studios} studio(s).")
+                        if failed:
+                            with st.expander(f"Failed ({len(failed)})", expanded=True):
+                                for f in failed:
+                                    st.write(f"- {f}")
+                        st.rerun()
+                else:
+                    st.info("Nothing new to import — everything in that file already exists.")
+
+        except Exception as e:
+            st.error(f"Could not read that CSV: {e}")
+
 
 # --- Tab: Settings ---
 with tab_settings:
