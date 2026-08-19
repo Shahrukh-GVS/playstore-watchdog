@@ -10,127 +10,18 @@ Isolation is enforced by Row Level Security in the database, not by this file.
 Once a user is signed in, their client carries their JWT and Postgres refuses
 to return anyone else's rows. `user_id` columns default to auth.uid(), so
 inserts stamp themselves.
-"""
 
-import time
-from datetime import datetime, timedelta
+Sessions live in st.session_state only, so refreshing the page signs you out.
+Persisting them needs a browser cookie, which Streamlit can't do natively; the
+third-party component we tried for it doesn't work reliably on current
+Streamlit/Python versions. Native st.login() with OIDC would be the sturdy
+route if this ever becomes worth revisiting.
+"""
 
 import streamlit as st
 from supabase import create_client
-import extra_streamlit_components as stx
 
 USERNAME_DOMAIN = "watchdog.local"
-SESSION_COOKIE = "psw_session"
-COOKIE_DAYS = 30
-
-
-def init_cookies():
-    """Construct the CookieManager once per script run.
-
-    CookieManager fills its internal dict at construction time. Caching the
-    instance across reruns therefore freezes whatever it saw on the very first
-    render — which, right after a page reload, is nothing at all. Rebuilding it
-    each run is what makes the cookie readable. The stable `key` keeps
-    Streamlit treating it as the same component.
-    """
-    st.session_state.psw_cm = stx.CookieManager(key="psw_cookie_manager")
-    return st.session_state.psw_cm
-
-
-def _cookies():
-    """The manager built for this run by init_cookies()."""
-    return st.session_state.get("psw_cm")
-
-
-def _save_session_cookie(refresh_token):
-    """Persist the refresh token so a page reload can restore the session.
-
-    Note this token lives in a browser cookie, so anyone with access to the
-    machine/browser can resume the session for up to COOKIE_DAYS. That is the
-    normal trade-off for 'stay signed in'; Sign out clears it immediately.
-    """
-    if not refresh_token:
-        return
-    cm = _cookies()
-    if cm is None:
-        return
-    try:
-        cm.set(
-            SESSION_COOKIE, refresh_token,
-            expires_at=datetime.now() + timedelta(days=COOKIE_DAYS),
-            key="psw_set_cookie",
-        )
-    except Exception:
-        pass
-
-
-def _clear_session_cookie():
-    cm = _cookies()
-    if cm is None:
-        return
-    try:
-        cm.delete(SESSION_COOKIE, key="psw_del_cookie")
-    except Exception:
-        pass
-
-
-def _restore_session(supabase_url, anon_key):
-    """Rebuild a signed-in client from the cookie after a page reload.
-
-    CookieManager talks to the browser asynchronously, so on the first script
-    run after a reload it reports nothing at all. We therefore allow a couple
-    of rerun cycles for it to report in before concluding there's no cookie —
-    giving up on that first empty read is exactly what kept logging you out.
-    """
-    if st.session_state.get("psw_restore_done"):
-        return False
-
-    cm = _cookies()
-    if cm is None:
-        return False
-    try:
-        token = cm.get(SESSION_COOKIE)
-    except Exception:
-        token = None
-
-    if not token:
-        tries = st.session_state.get("psw_cookie_tries", 0)
-        if tries < 3:
-            st.session_state.psw_cookie_tries = tries + 1
-            time.sleep(0.25)
-            st.rerun()
-        st.session_state.psw_restore_done = True
-        return False
-
-    st.session_state.psw_restore_done = True
-    try:
-        client = create_client(supabase_url, anon_key)
-        result = client.auth.refresh_session(token)
-        if not result or not result.user:
-            _clear_session_cookie()
-            return False
-
-        profile = None
-        try:
-            rows = client.table("profiles").select("*") \
-                .eq("user_id", result.user.id).execute().data
-            profile = rows[0] if rows else None
-        except Exception:
-            pass
-
-        st.session_state.sb_client = client
-        st.session_state.sb_user = {"id": result.user.id, "email": result.user.email}
-        st.session_state.sb_profile = profile or {
-            "user_id": result.user.id,
-            "username": email_to_username(result.user.email),
-            "is_admin": False,
-        }
-        if result.session and result.session.refresh_token:
-            _save_session_cookie(result.session.refresh_token)
-        return True
-    except Exception:
-        _clear_session_cookie()
-        return False
 
 
 def username_to_email(username):
@@ -212,8 +103,6 @@ def sign_in(supabase_url, anon_key, username, password):
     st.session_state.sb_client = client
     st.session_state.sb_user = {"id": result.user.id, "email": email}
     st.session_state.sb_profile = profile
-    if result.session and result.session.refresh_token:
-        _save_session_cookie(result.session.refresh_token)
     return True, None
 
 
@@ -224,10 +113,8 @@ def sign_out():
             client.auth.sign_out()
         except Exception:
             pass
-    for key in ("sb_client", "sb_user", "sb_profile",
-                "psw_restore_done", "psw_cookie_tries"):
+    for key in ("sb_client", "sb_user", "sb_profile"):
         st.session_state.pop(key, None)
-    _clear_session_cookie()
 
 
 def change_password(new_password, confirm_password):
@@ -309,9 +196,6 @@ def render_login(supabase_url, anon_key):
         if st.form_submit_button("Sign in", type="primary"):
             ok, err = sign_in(supabase_url, anon_key, username, password)
             if ok:
-                # CookieManager.set() needs a render cycle to reach the browser.
-                # Rerunning instantly would abort the write and lose the session.
-                time.sleep(0.6)
                 st.rerun()
             else:
                 st.error(err)
@@ -322,10 +206,7 @@ def render_login(supabase_url, anon_key):
 
 def require_login(supabase_url, anon_key):
     """Gate the whole app. -> True if signed in, False if the login page was shown."""
-    init_cookies()
     if st.session_state.get("sb_client") and st.session_state.get("sb_user"):
-        return True
-    if _restore_session(supabase_url, anon_key):
         return True
     render_login(supabase_url, anon_key)
     return False
