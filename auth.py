@@ -12,6 +12,7 @@ to return anyone else's rows. `user_id` columns default to auth.uid(), so
 inserts stamp themselves.
 """
 
+import time
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -63,21 +64,39 @@ def _clear_session_cookie():
 
 
 def _restore_session(supabase_url, anon_key):
-    """Rebuild a signed-in client from the cookie after a page reload."""
-    if st.session_state.get("psw_restore_tried"):
-        return False
-    try:
-        token = _cookies().get(SESSION_COOKIE)
-    except Exception:
-        token = None
-    if not token:
+    """Rebuild a signed-in client from the cookie after a page reload.
+
+    CookieManager talks to the browser asynchronously, so on the first script
+    run after a reload it reports nothing at all. We therefore allow a couple
+    of rerun cycles for it to report in before concluding there's no cookie —
+    giving up on that first empty read is exactly what kept logging you out.
+    """
+    if st.session_state.get("psw_restore_done"):
         return False
 
-    st.session_state.psw_restore_tried = True
+    cm = _cookies()
+    try:
+        all_cookies = cm.get_all(key="psw_get_all")
+    except Exception:
+        all_cookies = None
+
+    token = (all_cookies or {}).get(SESSION_COOKIE)
+
+    if not token:
+        tries = st.session_state.get("psw_cookie_tries", 0)
+        if tries < 3:
+            st.session_state.psw_cookie_tries = tries + 1
+            time.sleep(0.25)
+            st.rerun()
+        st.session_state.psw_restore_done = True
+        return False
+
+    st.session_state.psw_restore_done = True
     try:
         client = create_client(supabase_url, anon_key)
         result = client.auth.refresh_session(token)
         if not result or not result.user:
+            _clear_session_cookie()
             return False
 
         profile = None
@@ -101,28 +120,6 @@ def _restore_session(supabase_url, anon_key):
     except Exception:
         _clear_session_cookie()
         return False
-
-
-def username_to_email(username):
-    username = (username or "").strip().lower()
-    return f"{username}@{USERNAME_DOMAIN}" if username else ""
-
-
-def email_to_username(email):
-    return (email or "").split("@")[0]
-
-
-def get_user_client(supabase_url, anon_key):
-    """The signed-in user's client, or None. All app queries go through this."""
-    return st.session_state.get("sb_client")
-
-
-def get_admin_client(supabase_url, service_key):
-    """service_role client — used ONLY for creating users (Supabase has no
-    user-scoped way to do that). Never used for normal data access."""
-    if not service_key:
-        return None
-    return create_client(supabase_url, service_key)
 
 
 def current_profile():
@@ -194,7 +191,8 @@ def sign_out():
             client.auth.sign_out()
         except Exception:
             pass
-    for key in ("sb_client", "sb_user", "sb_profile", "psw_restore_tried"):
+    for key in ("sb_client", "sb_user", "sb_profile",
+                "psw_restore_done", "psw_cookie_tries"):
         st.session_state.pop(key, None)
     _clear_session_cookie()
 
@@ -269,6 +267,7 @@ def list_users(supabase_url, service_key):
 
 def render_login(supabase_url, anon_key):
     """Full-page login gate. Returns True once signed in."""
+    _cookies()  # mount the cookie component before we may need to write to it
     st.title("Play Store Watchdog")
     st.caption("Sign in to continue.")
 
@@ -278,6 +277,9 @@ def render_login(supabase_url, anon_key):
         if st.form_submit_button("Sign in", type="primary"):
             ok, err = sign_in(supabase_url, anon_key, username, password)
             if ok:
+                # CookieManager.set() needs a render cycle to reach the browser.
+                # Rerunning instantly would abort the write and lose the session.
+                time.sleep(0.6)
                 st.rerun()
             else:
                 st.error(err)
