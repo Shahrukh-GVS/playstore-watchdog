@@ -24,17 +24,22 @@ SESSION_COOKIE = "psw_session"
 COOKIE_DAYS = 30
 
 
-def _cookies():
-    """One CookieManager per session.
+def init_cookies():
+    """Construct the CookieManager once per script run.
 
-    This deliberately does NOT use @st.cache_resource — CookieManager renders a
-    hidden widget internally, and Streamlit forbids widget calls inside cached
-    functions. Stashing it in session_state gives us the same single-instance
-    behaviour without tripping that rule.
+    CookieManager fills its internal dict at construction time. Caching the
+    instance across reruns therefore freezes whatever it saw on the very first
+    render — which, right after a page reload, is nothing at all. Rebuilding it
+    each run is what makes the cookie readable. The stable `key` keeps
+    Streamlit treating it as the same component.
     """
-    if "psw_cookie_mgr" not in st.session_state:
-        st.session_state.psw_cookie_mgr = stx.CookieManager(key="psw_cookie_manager")
-    return st.session_state.psw_cookie_mgr
+    st.session_state.psw_cm = stx.CookieManager(key="psw_cookie_manager")
+    return st.session_state.psw_cm
+
+
+def _cookies():
+    """The manager built for this run by init_cookies()."""
+    return st.session_state.get("psw_cm")
 
 
 def _save_session_cookie(refresh_token):
@@ -46,8 +51,11 @@ def _save_session_cookie(refresh_token):
     """
     if not refresh_token:
         return
+    cm = _cookies()
+    if cm is None:
+        return
     try:
-        _cookies().set(
+        cm.set(
             SESSION_COOKIE, refresh_token,
             expires_at=datetime.now() + timedelta(days=COOKIE_DAYS),
             key="psw_set_cookie",
@@ -57,8 +65,11 @@ def _save_session_cookie(refresh_token):
 
 
 def _clear_session_cookie():
+    cm = _cookies()
+    if cm is None:
+        return
     try:
-        _cookies().delete(SESSION_COOKIE, key="psw_del_cookie")
+        cm.delete(SESSION_COOKIE, key="psw_del_cookie")
     except Exception:
         pass
 
@@ -75,12 +86,12 @@ def _restore_session(supabase_url, anon_key):
         return False
 
     cm = _cookies()
+    if cm is None:
+        return False
     try:
-        all_cookies = cm.get_all(key="psw_get_all")
+        token = cm.get(SESSION_COOKIE)
     except Exception:
-        all_cookies = None
-
-    token = (all_cookies or {}).get(SESSION_COOKIE)
+        token = None
 
     if not token:
         tries = st.session_state.get("psw_cookie_tries", 0)
@@ -289,7 +300,6 @@ def list_users(supabase_url, service_key):
 
 def render_login(supabase_url, anon_key):
     """Full-page login gate. Returns True once signed in."""
-    _cookies()  # mount the cookie component before we may need to write to it
     st.title("Play Store Watchdog")
     st.caption("Sign in to continue.")
 
@@ -312,6 +322,7 @@ def render_login(supabase_url, anon_key):
 
 def require_login(supabase_url, anon_key):
     """Gate the whole app. -> True if signed in, False if the login page was shown."""
+    init_cookies()
     if st.session_state.get("sb_client") and st.session_state.get("sb_user"):
         return True
     if _restore_session(supabase_url, anon_key):
