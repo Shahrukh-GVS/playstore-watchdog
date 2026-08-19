@@ -122,6 +122,28 @@ def _restore_session(supabase_url, anon_key):
         return False
 
 
+def username_to_email(username):
+    username = (username or "").strip().lower()
+    return f"{username}@{USERNAME_DOMAIN}" if username else ""
+
+
+def email_to_username(email):
+    return (email or "").split("@")[0]
+
+
+def get_user_client(supabase_url, anon_key):
+    """The signed-in user's client, or None. All app queries go through this."""
+    return st.session_state.get("sb_client")
+
+
+def get_admin_client(supabase_url, service_key):
+    """service_role client — used ONLY for creating users (Supabase has no
+    user-scoped way to do that). Never used for normal data access."""
+    if not service_key:
+        return None
+    return create_client(supabase_url, service_key)
+
+
 def current_profile():
     return st.session_state.get("sb_profile")
 
