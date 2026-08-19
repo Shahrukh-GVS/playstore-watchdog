@@ -12,10 +12,88 @@ to return anyone else's rows. `user_id` columns default to auth.uid(), so
 inserts stamp themselves.
 """
 
+from datetime import datetime, timedelta
+
 import streamlit as st
 from supabase import create_client
+import extra_streamlit_components as stx
 
 USERNAME_DOMAIN = "watchdog.local"
+SESSION_COOKIE = "psw_session"
+COOKIE_DAYS = 30
+
+
+@st.cache_resource
+def _cookies():
+    """One CookieManager for the whole app — creating more than one breaks it."""
+    return stx.CookieManager(key="psw_cookie_manager")
+
+
+def _save_session_cookie(refresh_token):
+    """Persist the refresh token so a page reload can restore the session.
+
+    Note this token lives in a browser cookie, so anyone with access to the
+    machine/browser can resume the session for up to COOKIE_DAYS. That is the
+    normal trade-off for 'stay signed in'; Sign out clears it immediately.
+    """
+    if not refresh_token:
+        return
+    try:
+        _cookies().set(
+            SESSION_COOKIE, refresh_token,
+            expires_at=datetime.now() + timedelta(days=COOKIE_DAYS),
+            key="psw_set_cookie",
+        )
+    except Exception:
+        pass
+
+
+def _clear_session_cookie():
+    try:
+        _cookies().delete(SESSION_COOKIE, key="psw_del_cookie")
+    except Exception:
+        pass
+
+
+def _restore_session(supabase_url, anon_key):
+    """Rebuild a signed-in client from the cookie after a page reload."""
+    if st.session_state.get("psw_restore_tried"):
+        return False
+    try:
+        token = _cookies().get(SESSION_COOKIE)
+    except Exception:
+        token = None
+    if not token:
+        return False
+
+    st.session_state.psw_restore_tried = True
+    try:
+        client = create_client(supabase_url, anon_key)
+        result = client.auth.refresh_session(token)
+        if not result or not result.user:
+            return False
+
+        profile = None
+        try:
+            rows = client.table("profiles").select("*") \
+                .eq("user_id", result.user.id).execute().data
+            profile = rows[0] if rows else None
+        except Exception:
+            pass
+
+        st.session_state.sb_client = client
+        st.session_state.sb_user = {"id": result.user.id, "email": result.user.email}
+        st.session_state.sb_profile = profile or {
+            "user_id": result.user.id,
+            "username": email_to_username(result.user.email),
+            "is_admin": False,
+        }
+        if result.session and result.session.refresh_token:
+            _save_session_cookie(result.session.refresh_token)
+        return True
+    except Exception:
+        _clear_session_cookie()
+        return False
 
 
 def username_to_email(username):
@@ -97,6 +175,8 @@ def sign_in(supabase_url, anon_key, username, password):
     st.session_state.sb_client = client
     st.session_state.sb_user = {"id": result.user.id, "email": email}
     st.session_state.sb_profile = profile
+    if result.session and result.session.refresh_token:
+        _save_session_cookie(result.session.refresh_token)
     return True, None
 
 
@@ -107,8 +187,9 @@ def sign_out():
             client.auth.sign_out()
         except Exception:
             pass
-    for key in ("sb_client", "sb_user", "sb_profile"):
+    for key in ("sb_client", "sb_user", "sb_profile", "psw_restore_tried"):
         st.session_state.pop(key, None)
+    _clear_session_cookie()
 
 
 def change_password(new_password, confirm_password):
@@ -116,8 +197,8 @@ def change_password(new_password, confirm_password):
     client = st.session_state.get("sb_client")
     if not client:
         return False, "Not signed in."
-    if not new_password or len(new_password) < 8:
-        return False, "Password must be at least 8 characters."
+    if not new_password:
+        return False, "Password can't be empty."
     if new_password != confirm_password:
         return False, "The two passwords don't match."
     try:
@@ -132,8 +213,6 @@ def create_user(supabase_url, service_key, username, password, make_admin=False)
     username = (username or "").strip().lower()
     if not username or not password:
         return False, "Username and password are required."
-    if len(password) < 8:
-        return False, "Password must be at least 8 characters."
     if not username.replace(".", "").replace("_", "").replace("-", "").isalnum():
         return False, "Username may only contain letters, numbers, dots, hyphens and underscores."
 
@@ -203,6 +282,8 @@ def render_login(supabase_url, anon_key):
 def require_login(supabase_url, anon_key):
     """Gate the whole app. -> True if signed in, False if the login page was shown."""
     if st.session_state.get("sb_client") and st.session_state.get("sb_user"):
+        return True
+    if _restore_session(supabase_url, anon_key):
         return True
     render_login(supabase_url, anon_key)
     return False

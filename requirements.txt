@@ -6,3 +6,4 @@ python-dotenv
 Pillow
 imagehash
 streamlit
+extra-streamlit-components
