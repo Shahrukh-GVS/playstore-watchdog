@@ -36,8 +36,8 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-SLACK_WEBHOOK_URL_MAIN = os.getenv("SLACK_WEBHOOK_URL_MAIN")
+# Webhooks are per-user now, read from the user_settings table at send time.
+# Nothing notification-related lives in environment variables any more.
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -49,11 +49,6 @@ HEADERS = {
 FALLBACK_COUNTRIES = ["us", "pk", "gb", "in", "ca"]
 REMOVED_RECHECK_HOURS = 24
 
-COLOR_NEW = 0x2ecc71
-COLOR_REMOVED = 0xe74c3c
-COLOR_TRANSFER = 0xe67e22
-COLOR_LISTING = 0x3498db
-COLOR_INFO = 0x95a5a6
 
 
 def fetch_app_page(package_name, country="us"):
@@ -249,123 +244,119 @@ def check_app_directly(package_name, last_status, last_seen_iso):
     return "removed", None
 
 
-def send_slack(text_blocks):
-    if not SLACK_WEBHOOK_URL_MAIN:
-        return
+def send_slack(webhook_url, text_blocks):
+    """Returns True if everything sent. Per-user webhook, passed in by caller."""
+    if not webhook_url or not text_blocks:
+        return True
+    ok = True
     for text in text_blocks:
         try:
-            requests.post(SLACK_WEBHOOK_URL_MAIN, json={"text": text}, timeout=15)
+            resp = requests.post(webhook_url, json={"text": text}, timeout=15)
+            if resp.status_code >= 300:
+                print(f"[warn] Slack returned {resp.status_code}: {resp.text[:200]}")
+                ok = False
         except Exception as e:
             print(f"[warn] Slack send failed: {e}")
+            ok = False
+    return ok
 
 
-def send_digest(events, run_id=None):
-    total = sum(len(v) for v in events.values())
-    footer = {"text": f"Check run: {run_id}"} if run_id else None
+EVENT_TOGGLES = {
+    "new_upload": "notify_new_upload",
+    "transferred_in": "notify_transferred",
+    "transferred": "notify_transferred",
+    "removed": "notify_removed",
+    "listing_changed": "notify_listing_changed",
+}
 
-    if total == 0:
-        embed = {
-            "title": "Watchdog check complete",
-            "description": "Nothing new this cycle. All watched accounts checked.",
-            "color": COLOR_INFO,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-        if footer:
-            embed["footer"] = footer
-        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": [embed]}, timeout=15)
-        send_slack([f":white_check_mark: Watchdog check complete — nothing new this cycle."])
-        return
 
-    embeds = []
-    slack_texts = []
+def build_slack_messages(events, settings):
+    """Turns detected events into Slack lines, honouring the user's per-event
+    toggles from their Settings tab."""
+    def wanted(kind):
+        key = EVENT_TOGGLES.get(kind)
+        return bool(settings.get(key, True)) if key else True
 
     def play_link(package_name):
         return f"https://play.google.com/store/apps/details?id={package_name}&gl=us"
 
-    for ev in events.get("new_upload", []):
-        link = play_link(ev["package_name"])
-        embed = {
-            "title": f"New upload: {ev['title']}",
-            "url": link,
-            "description": f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nDeveloper: {ev['developer_name']}\n[Open on Play Store]({link})",
-            "color": COLOR_NEW,
-        }
-        if ev.get("icon_url"):
-            embed["thumbnail"] = {"url": ev["icon_url"]}
-        embeds.append(embed)
-        slack_texts.append(f":new: [{ev.get('studio_name', 'Unassigned')}] New upload: *{ev['title']}* ({ev['developer_name']}) — <{link}|Open>")
+    texts = []
 
-    for ev in events.get("transferred_in", []):
-        link = play_link(ev["package_name"])
-        embed = {
-            "title": f"Transferred in (already has installs): {ev['title']}",
-            "url": link,
-            "description": (f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nNow under: {ev['developer_name']}\n"
-                             f"Origin: {ev.get('origin', 'unknown')}\n[Open on Play Store]({link})"),
-            "color": COLOR_TRANSFER,
-        }
-        if ev.get("icon_url"):
-            embed["thumbnail"] = {"url": ev["icon_url"]}
-        embeds.append(embed)
-        slack_texts.append(f":inbox_tray: [{ev.get('studio_name', 'Unassigned')}] Transferred in: *{ev['title']}* → {ev['developer_name']} — <{link}|Open>")
+    if wanted("new_upload"):
+        for ev in events.get("new_upload", []):
+            link = play_link(ev["package_name"])
+            texts.append(
+                f":new: [{ev.get('studio_name', 'Unassigned')}] New upload: "
+                f"*{ev['title']}* ({ev['developer_name']}) — <{link}|Open>"
+            )
 
-    for ev in events.get("transferred", []):
-        link = play_link(ev["package_name"])
-        embeds.append({
-            "title": f"Transferred: {ev['title']}",
-            "url": link,
-            "description": (f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nFrom: {ev['old_dev']}\nTo: {ev['new_dev']}\n"
-                             f"[Open on Play Store]({link})"),
-            "color": COLOR_TRANSFER,
-        })
-        slack_texts.append(f":twisted_rightwards_arrows: [{ev.get('studio_name', 'Unassigned')}] Transferred: *{ev['title']}* — {ev['old_dev']} → {ev['new_dev']} — <{link}|Open>")
+    if wanted("transferred_in"):
+        for ev in events.get("transferred_in", []):
+            link = play_link(ev["package_name"])
+            texts.append(
+                f":inbox_tray: [{ev.get('studio_name', 'Unassigned')}] Transferred in: "
+                f"*{ev['title']}* → {ev['developer_name']} — <{link}|Open>"
+            )
 
-    for ev in events.get("removed", []):
-        link = play_link(ev["package_name"])
-        embeds.append({
-            "title": f"Removed: {ev['title']}",
-            "description": (f"Studio: **{ev.get('studio_name', 'Unassigned')}**\nPackage: `{ev['package_name']}`\nLast known developer: {ev['developer_name']}\n"
-                             f"[Last known Play Store link]({link}) (likely dead now)"),
-            "color": COLOR_REMOVED,
-        })
-        slack_texts.append(f":wastebasket: [{ev.get('studio_name', 'Unassigned')}] Removed: *{ev['title']}* ({ev['developer_name']}) — <{link}|Last known link>")
+    if wanted("transferred"):
+        for ev in events.get("transferred", []):
+            link = play_link(ev["package_name"])
+            texts.append(
+                f":twisted_rightwards_arrows: [{ev.get('studio_name', 'Unassigned')}] "
+                f"Transferred: *{ev['title']}* — {ev['old_dev']} → {ev['new_dev']} — <{link}|Open>"
+            )
 
-    for ev in events.get("listing_changed", []):
-        link = play_link(ev["package_name"])
-        desc_lines = []
-        slack_lines = []
-        if ev.get("title_changed"):
-            desc_lines.append(f"Title: **{ev['old_title']}** -> **{ev['new_title']}**")
-            slack_lines.append(f"Title: {ev['old_title']} -> {ev['new_title']}")
-        if ev.get("icon_changed"):
-            desc_lines.append("Icon changed (see images below)")
-            slack_lines.append("Icon changed")
-        desc_lines.append(f"Package: `{ev['package_name']}`")
-        desc_lines.append(f"[Open on Play Store]({link})")
+    if wanted("removed"):
+        for ev in events.get("removed", []):
+            link = play_link(ev["package_name"])
+            texts.append(
+                f":wastebasket: [{ev.get('studio_name', 'Unassigned')}] Removed: "
+                f"*{ev['title']}* ({ev['developer_name']}) — <{link}|Last known link>"
+            )
 
-        desc_lines.insert(0, f"Studio: **{ev.get('studio_name', 'Unassigned')}**")
-        embed = {"title": "Listing changed", "url": link, "description": "\n".join(desc_lines), "color": COLOR_LISTING}
-        if ev.get("icon_changed"):
-            if ev.get("old_icon_url"):
-                embed["thumbnail"] = {"url": ev["old_icon_url"]}
-            if ev.get("new_icon_url"):
-                embed["image"] = {"url": ev["new_icon_url"]}
-        embeds.append(embed)
-        slack_texts.append(f":art: [{ev.get('studio_name', 'Unassigned')}] Listing changed — " + "; ".join(slack_lines) + f" — <{link}|Open>")
+    if wanted("listing_changed"):
+        for ev in events.get("listing_changed", []):
+            link = play_link(ev["package_name"])
+            parts = []
+            if ev.get("title_changed"):
+                parts.append(f"Title: {ev['old_title']} → {ev['new_title']}")
+            if ev.get("icon_changed"):
+                parts.append("Icon changed")
+            texts.append(
+                f":art: [{ev.get('studio_name', 'Unassigned')}] Listing changed — "
+                + "; ".join(parts) + f" — <{link}|Open>"
+            )
 
-    if footer and embeds:
-        embeds[-1]["footer"] = footer
-
-    for i in range(0, len(embeds), 10):
-        batch = embeds[i:i + 10]
-        requests.post(DISCORD_WEBHOOK_URL, json={"embeds": batch}, timeout=15)
-
-    send_slack(slack_texts)
+    return texts
 
 
-def upsert_developer(dev_name, dev_link):
+def send_digest(events, webhook_url, settings, run_id=None):
+    """One digest to one user's Slack channel. Returns True on success."""
+    if not settings.get("slack_enabled", True):
+        return True
+    if not webhook_url:
+        print("[info] User has no Slack webhook configured — skipping notification.")
+        return True
+
+    texts = build_slack_messages(events, settings)
+
+    if not texts:
+        if settings.get("notify_nothing_new", True):
+            return send_slack(webhook_url, [
+                ":white_check_mark: Watchdog check complete — nothing new this cycle."
+            ])
+        return True
+
+    return send_slack(webhook_url, texts)
+
+
+
+def upsert_developer(dev_name, dev_link, user_id, studio_id=None):
+    """Scoped to one user. The lookup MUST filter on user_id — without it this
+    could return a different user's developer row and cross-link their data."""
     dev_id = extract_dev_id_from_link(dev_link)
-    existing = supabase.table("developers").select("id").eq("dev_id", dev_id).execute()
+    existing = supabase.table("developers").select("id") \
+        .eq("dev_id", dev_id).eq("user_id", user_id).execute()
     if existing.data:
         return existing.data[0]["id"]
     result = supabase.table("developers").insert({
@@ -373,15 +364,22 @@ def upsert_developer(dev_name, dev_link):
         "name": dev_name,
         "developer_url": dev_link,
         "source": "transfer",
+        "user_id": user_id,
+        "studio_id": studio_id,
     }).execute()
     return result.data[0]["id"]
 
 
 def log_change(app_id, developer_id, event_type, old_value, new_value,
-                run_id=None, developer_name=None, app_title=None, package_name=None):
+                run_id=None, developer_name=None, app_title=None, package_name=None,
+                user_id=None):
+    """user_id MUST be passed explicitly. This process authenticates with the
+    service_role key, so auth.uid() is NULL and the column default won't fire —
+    an unstamped row would be invisible to the user who owns it."""
     supabase.table("change_log").insert({
         "app_id": app_id,
         "developer_id": developer_id,
+        "user_id": user_id,
         "event_type": event_type,
         "old_value": old_value,
         "new_value": new_value,
@@ -393,21 +391,58 @@ def log_change(app_id, developer_id, event_type, old_value, new_value,
 
 
 def main():
+    """Runs the check for every user, in isolation, and sends each of them a
+    digest on their own Slack webhook.
+
+    This process uses the service_role key and therefore bypasses RLS — it can
+    see everyone's rows, which is exactly what a scheduled backend job needs.
+    The flip side is that auth.uid() is NULL here, so every insert below has to
+    set user_id by hand.
+    """
     run_id = datetime.now(timezone.utc).isoformat()
 
+    all_devs = supabase.table("developers").select("*") \
+        .neq("source", "own_account").execute().data
+    if not all_devs:
+        print("[info] No tracked developers. Nothing to do.")
+        return
+
+    studios_lookup = {s["id"]: s["name"]
+                      for s in supabase.table("studios").select("id, name").execute().data}
+    settings_by_user = {s["user_id"]: s
+                        for s in supabase.table("user_settings").select("*").execute().data}
+
+    by_user = {}
+    for d in all_devs:
+        by_user.setdefault(d.get("user_id"), []).append(d)
+
+    for user_id, user_devs in by_user.items():
+        if not user_id:
+            print(f"[warn] {len(user_devs)} developer(s) have no user_id — skipping. "
+                  "Run the backfill migration to assign them.")
+            continue
+
+        settings = settings_by_user.get(user_id, {})
+        print(f"[info] Checking {len(user_devs)} developer(s) for user {user_id}")
+        try:
+            process_user(user_id, user_devs, settings, studios_lookup, run_id)
+        except Exception as e:
+            print(f"[error] User {user_id} failed: {type(e).__name__}: {e}")
+
+    print("[info] Monitor cycle complete for all users.")
+
+
+def process_user(user_id, user_devs, settings, studios_lookup, run_id):
     events = {
         "new_upload": [], "transferred_in": [], "transferred": [],
         "removed": [], "listing_changed": [],
     }
 
-    developers_resp = supabase.table("developers").select("*").neq("source", "own_account").execute()
-    developers = {d["id"]: d for d in developers_resp.data}
-
-    studios_lookup = {s["id"]: s["name"] for s in supabase.table("studios").select("id, name").execute().data}
+    developers = {d["id"]: d for d in user_devs}
     for d in developers.values():
         d["studio_name"] = studios_lookup.get(d.get("studio_id"), "Unassigned")
 
-    apps_resp = supabase.table("apps").select("*").execute()
+    apps_resp = supabase.table("apps").select("*").eq("user_id", user_id).execute()
     db_apps = {a["package_name"]: a for a in apps_resp.data if a["developer_id"] in developers}
 
     fresh_map = {}
@@ -443,6 +478,7 @@ def main():
             insert_res = supabase.table("apps").insert({
                 "package_name": package_name,
                 "developer_id": fresh["developer_id"],
+                "user_id": user_id,
                 "title": final_title,
                 "icon_url": fresh["icon_url"],
                 "icon_hash": icon_hash,
@@ -459,7 +495,7 @@ def main():
                 })
                 log_change(new_app_id, fresh["developer_id"], "new_upload", None, {"title": final_title},
                            run_id=run_id, developer_name=f"[{fresh.get('studio_name', 'Unassigned')}] {fresh['developer_name']}",
-                           app_title=final_title, package_name=package_name)
+                           app_title=final_title, package_name=package_name, user_id=user_id)
             else:
                 events["transferred_in"].append({
                     "package_name": package_name, "title": final_title,
@@ -468,7 +504,7 @@ def main():
                 })
                 log_change(new_app_id, fresh["developer_id"], "transferred_in", None, {"title": final_title},
                            run_id=run_id, developer_name=f"[{fresh.get('studio_name', 'Unassigned')}] {fresh['developer_name']}",
-                           app_title=final_title, package_name=package_name)
+                           app_title=final_title, package_name=package_name, user_id=user_id)
             continue
 
         if stored["developer_id"] != fresh["developer_id"]:
@@ -487,7 +523,7 @@ def main():
             log_change(stored["id"], fresh["developer_id"], "transferred",
                        {"developer": old_dev_name}, {"developer": new_dev_name},
                        run_id=run_id, developer_name=new_dev_name,
-                       app_title=fresh["title"], package_name=package_name)
+                       app_title=fresh["title"], package_name=package_name, user_id=user_id)
             continue
 
         new_icon_hash = get_icon_hash(fresh["icon_url"])
@@ -536,7 +572,7 @@ def main():
             })
             log_change(stored["id"], fresh["developer_id"], "listing_changed", old_value, new_value,
                        run_id=run_id, developer_name=f"[{fresh.get('studio_name', 'Unassigned')}] {fresh['developer_name']}",
-                       app_title=confirmed_new_title, package_name=package_name)
+                       app_title=confirmed_new_title, package_name=package_name, user_id=user_id)
             if title_changed:
                 update_fields["title"] = confirmed_new_title
             if icon_changed:
@@ -568,7 +604,7 @@ def main():
                 log_change(stored["id"], stored["developer_id"], "removed",
                            {"title": stored["title"]}, None,
                            run_id=run_id, developer_name=f"[{developers.get(stored['developer_id'], {}).get('studio_name', 'Unassigned')}] {dev_name}",
-                           app_title=stored["title"], package_name=package_name)
+                           app_title=stored["title"], package_name=package_name, user_id=user_id)
             supabase.table("apps").update({
                 "status": "removed",
                 "last_seen": datetime.now(timezone.utc).isoformat(),
@@ -593,11 +629,13 @@ def main():
                 }).eq("id", stored["id"]).execute()
                 continue
 
-            existing_dev = supabase.table("developers").select("*").eq("dev_id", new_dev_id_str).execute()
+            existing_dev = supabase.table("developers").select("*") \
+                .eq("dev_id", new_dev_id_str).eq("user_id", user_id).execute()
             if existing_dev.data:
                 new_developer_id = existing_dev.data[0]["id"]
             else:
-                new_developer_id = upsert_developer(dev_name, dev_link)
+                new_developer_id = upsert_developer(dev_name, dev_link, user_id,
+                                                    studio_id=old_dev.get("studio_id"))
                 new_catalog = fetch_developer_catalog(dev_link, developer_name=dev_name)
                 for a in new_catalog:
                     if a["package_name"] == package_name:
@@ -608,6 +646,7 @@ def main():
                     supabase.table("apps").insert({
                         "package_name": a["package_name"],
                         "developer_id": new_developer_id,
+                        "user_id": user_id,
                         "title": a["title"],
                         "icon_url": a["icon_url"],
                         "status": "active",
@@ -626,10 +665,9 @@ def main():
             log_change(stored["id"], new_developer_id, "transferred",
                        {"developer": old_dev.get("name", "unknown")}, {"developer": dev_name},
                        run_id=run_id, developer_name=f"[{developers.get(stored['developer_id'], {}).get('studio_name', 'Unassigned')}] {dev_name}",
-                       app_title=stored["title"], package_name=package_name)
+                       app_title=stored["title"], package_name=package_name, user_id=user_id)
 
-    send_digest(events, run_id)
-    print("[info] Monitor cycle complete.")
+    send_digest(events, settings.get("slack_webhook_url"), settings, run_id)
 
 
 if __name__ == "__main__":

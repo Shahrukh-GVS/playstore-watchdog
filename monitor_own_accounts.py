@@ -25,8 +25,7 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+# Webhooks are per-user now, read from user_settings at send time.
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -178,34 +177,16 @@ def check_app_directly(package_name, last_status, last_seen_iso):
     return "removed", None
 
 
-def send_discord(embeds):
-    """Returns True if all sends succeeded (or no webhook configured)."""
-    if not DISCORD_WEBHOOK_URL:
-        return True
-    ok = True
-    for i in range(0, len(embeds), 10):
-        batch = embeds[i:i + 10]
-        try:
-            resp = requests.post(DISCORD_WEBHOOK_URL, json={"embeds": batch}, timeout=15)
-            if resp.status_code >= 300:
-                print(f"[warn] Discord returned status {resp.status_code}: {resp.text[:200]}")
-                ok = False
-        except Exception as e:
-            print(f"[warn] Discord send failed: {e}")
-            ok = False
-    return ok
-
-
-def send_slack(text_blocks):
-    """Returns True if all sends succeeded (or no webhook configured)."""
-    if not SLACK_WEBHOOK_URL:
+def send_slack(webhook_url, text_blocks):
+    """Returns True if everything sent. Per-user webhook, passed in by caller."""
+    if not webhook_url or not text_blocks:
         return True
     ok = True
     for text in text_blocks:
         try:
-            resp = requests.post(SLACK_WEBHOOK_URL, json={"text": text}, timeout=15)
+            resp = requests.post(webhook_url, json={"text": text}, timeout=15)
             if resp.status_code >= 300:
-                print(f"[warn] Slack returned status {resp.status_code}: {resp.text[:200]}")
+                print(f"[warn] Slack returned {resp.status_code}: {resp.text[:200]}")
                 ok = False
         except Exception as e:
             print(f"[warn] Slack send failed: {e}")
@@ -217,76 +198,100 @@ def play_link(package_name):
     return f"https://play.google.com/store/apps/details?id={package_name}&gl=us"
 
 
-def send_digest(events):
-    total = sum(len(v) for v in events.values())
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-
-    if total == 0:
-        send_discord([{
-            "title": "My Accounts check complete",
-            "description": "Nothing new this cycle (30-min check).",
-            "color": 0x95a5a6,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }])
-        send_slack([f":white_check_mark: *My Accounts check complete* — nothing new this cycle ({now_str})"])
+def send_digest(events, webhook_url, settings):
+    """One digest to one user's Slack channel, honouring their event toggles."""
+    if not settings.get("slack_enabled", True):
+        return True
+    if not webhook_url:
+        print("[info] User has no Slack webhook configured — skipping notification.")
         return True
 
-    embeds = []
-    slack_texts = []
+    def wanted(key):
+        return bool(settings.get(key, True))
 
-    for ev in events.get("removed", []):
-        link = play_link(ev["package_name"])
-        embeds.append({
-            "title": f"🚨 REMOVED: {ev['title']}",
-            "description": f"Account: **{ev['developer_name']}**\nPackage: `{ev['package_name']}`\n[Last known link]({link})",
-            "color": 0xe74c3c,
-        })
-        slack_texts.append(
-            f":rotating_light: *GAME REMOVED* :rotating_light:\n"
-            f"*{ev['title']}* under account *{ev['developer_name']}*\n"
-            f"Package: `{ev['package_name']}`\n<{link}|Last known link>"
-        )
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    texts = []
 
-    for ev in events.get("new_upload", []):
-        link = play_link(ev["package_name"])
-        embeds.append({
-            "title": f"🆕 New upload: {ev['title']}",
-            "description": f"Account: **{ev['developer_name']}**\nPackage: `{ev['package_name']}`\n[Open]({link})",
-            "color": 0x2ecc71,
-        })
-        slack_texts.append(f":new: New upload: *{ev['title']}* ({ev['developer_name']}) — <{link}|Open>")
+    if wanted("notify_removed"):
+        for ev in events.get("removed", []):
+            link = play_link(ev["package_name"])
+            texts.append(
+                f":rotating_light: *GAME REMOVED* :rotating_light:\n"
+                f"*{ev['title']}* under account *{ev['developer_name']}*\n"
+                f"Package: `{ev['package_name']}`\n<{link}|Last known link>"
+            )
 
-    for ev in events.get("listing_changed", []):
-        link = play_link(ev["package_name"])
-        lines = []
-        if ev.get("title_changed"):
-            lines.append(f"Title: {ev['old_title']} -> {ev['new_title']}")
-        if ev.get("icon_changed"):
-            lines.append("Icon changed")
-        embeds.append({
-            "title": f"🎨 Listing changed: {ev['new_title']}",
-            "description": f"Account: **{ev['developer_name']}**\n" + "\n".join(lines) + f"\n[Open]({link})",
-            "color": 0x3498db,
-        })
-        slack_texts.append(f":art: Listing changed: *{ev['new_title']}* ({ev['developer_name']}) — " + "; ".join(lines))
+    if wanted("notify_new_upload"):
+        for ev in events.get("new_upload", []):
+            link = play_link(ev["package_name"])
+            texts.append(
+                f":new: New upload: *{ev['title']}* ({ev['developer_name']}) — <{link}|Open>"
+            )
 
-    discord_ok = send_discord(embeds)
-    slack_ok = send_slack(slack_texts)
-    return discord_ok and slack_ok
+    if wanted("notify_listing_changed"):
+        for ev in events.get("listing_changed", []):
+            link = play_link(ev["package_name"])
+            parts = []
+            if ev.get("title_changed"):
+                parts.append(f"Title: {ev['old_title']} → {ev['new_title']}")
+            if ev.get("icon_changed"):
+                parts.append("Icon changed")
+            texts.append(
+                f":art: Listing changed: *{ev['new_title']}* ({ev['developer_name']}) — "
+                + "; ".join(parts) + f" — <{link}|Open>"
+            )
+
+    if not texts:
+        if settings.get("notify_nothing_new", True):
+            return send_slack(webhook_url, [
+                f":white_check_mark: *My Accounts check complete* — nothing new ({now_str})"
+            ])
+        return True
+
+    return send_slack(webhook_url, texts)
+
 
 
 def main():
-    events = {"new_upload": [], "removed": [], "listing_changed": []}
-    pending_removals = []
+    """Checks every user's own accounts, in isolation, alerting each on their
+    own Slack webhook.
 
-    developers_resp = supabase.table("developers").select("*").eq("source", "own_account").execute()
-    developers = {d["id"]: d for d in developers_resp.data}
-
-    if not developers:
+    Uses the service_role key, so RLS is bypassed (correct for a backend job)
+    but auth.uid() is NULL — every insert below sets user_id explicitly.
+    """
+    all_devs = supabase.table("developers").select("*") \
+        .eq("source", "own_account").execute().data
+    if not all_devs:
         print("[info] No own accounts registered. Nothing to check.")
         return
 
-    apps_resp = supabase.table("apps").select("*").execute()
+    settings_by_user = {s["user_id"]: s
+                        for s in supabase.table("user_settings").select("*").execute().data}
+
+    by_user = {}
+    for d in all_devs:
+        by_user.setdefault(d.get("user_id"), []).append(d)
+
+    for user_id, user_devs in by_user.items():
+        if not user_id:
+            print(f"[warn] {len(user_devs)} own account(s) have no user_id — skipping.")
+            continue
+        print(f"[info] Checking {len(user_devs)} own account(s) for user {user_id}")
+        try:
+            process_user(user_id, user_devs, settings_by_user.get(user_id, {}))
+        except Exception as e:
+            print(f"[error] User {user_id} failed: {type(e).__name__}: {e}")
+
+    print("[info] Own accounts check complete for all users.")
+
+
+def process_user(user_id, user_devs, settings):
+    events = {"new_upload": [], "removed": [], "listing_changed": []}
+    pending_removals = []
+
+    developers = {d["id"]: d for d in user_devs}
+
+    apps_resp = supabase.table("apps").select("*").eq("user_id", user_id).execute()
     db_apps = {a["package_name"]: a for a in apps_resp.data if a["developer_id"] in developers}
 
     fresh_map = {}
@@ -315,6 +320,7 @@ def main():
 
             insert_res = supabase.table("apps").insert({
                 "package_name": package_name, "developer_id": fresh["developer_id"],
+                "user_id": user_id,
                 "title": final_title, "icon_url": fresh["icon_url"],
                 "icon_hash": icon_hash, "status": "active",
             }).execute()
@@ -325,7 +331,8 @@ def main():
                 "developer_name": fresh["developer_name"],
             })
             supabase.table("change_log").insert({
-                "app_id": new_app_id, "developer_id": fresh["developer_id"], "event_type": "new_upload",
+                "app_id": new_app_id, "developer_id": fresh["developer_id"], "user_id": user_id,
+                "event_type": "new_upload",
                 "old_value": None, "new_value": {"title": final_title},
                 "developer_name": fresh["developer_name"], "app_title": final_title, "package_name": package_name,
             }).execute()
@@ -368,7 +375,8 @@ def main():
                 update_fields["icon_hash"] = new_icon_hash
 
             supabase.table("change_log").insert({
-                "app_id": stored["id"], "developer_id": fresh["developer_id"], "event_type": "listing_changed",
+                "app_id": stored["id"], "developer_id": fresh["developer_id"], "user_id": user_id,
+                "event_type": "listing_changed",
                 "old_value": old_value, "new_value": new_value,
                 "developer_name": fresh["developer_name"], "app_title": confirmed_new_title, "package_name": package_name,
             }).execute()
@@ -416,7 +424,10 @@ def main():
 
     # Send notifications FIRST — only mark removals in the DB once alerts
     # have actually gone out, so a failed send doesn't silently swallow them.
-    notified_ok = send_digest(events)
+    # Prefer the dedicated My Accounts channel; fall back to the watchlist
+    # channel if the user hasn't set a separate one.
+    own_webhook = settings.get("slack_webhook_url_own") or settings.get("slack_webhook_url")
+    notified_ok = send_digest(events, own_webhook, settings)
 
     if pending_removals and not notified_ok:
         print("[warn] Notification delivery failed — NOT marking removals in DB. "
@@ -426,7 +437,8 @@ def main():
 
     for pr in pending_removals:
         supabase.table("change_log").insert({
-            "app_id": pr["app_id"], "developer_id": pr["developer_id"], "event_type": "removed",
+            "app_id": pr["app_id"], "developer_id": pr["developer_id"], "user_id": user_id,
+            "event_type": "removed",
             "old_value": {"title": pr["title"]}, "new_value": None,
             "developer_name": pr["dev_name"], "app_title": pr["title"], "package_name": pr["package_name"],
         }).execute()
@@ -436,8 +448,6 @@ def main():
 
     if pending_removals:
         print(f"[info] Committed {len(pending_removals)} removal(s) after notification.")
-
-    print("[info] Own accounts check complete.")
 
 
 if __name__ == "__main__":

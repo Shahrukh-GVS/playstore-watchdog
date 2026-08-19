@@ -1343,12 +1343,23 @@ with tab_settings:
         st.error(f"Could not load your settings: {e}")
 
     with st.form("slack_settings_form"):
+        st.markdown("**Watchlist channel** — competitor tracking, checked every 2 hours")
         webhook = st.text_input(
-            "Slack webhook URL",
+            "Slack webhook URL (watchlist)",
             value=settings.get("slack_webhook_url") or "",
             placeholder="https://hooks.slack.com/services/...",
             help="Slack → your app → Incoming Webhooks → Add New Webhook to Workspace",
         )
+
+        st.markdown("**My Accounts channel** — your own accounts, checked every 30 minutes")
+        webhook_own = st.text_input(
+            "Slack webhook URL (my accounts)",
+            value=settings.get("slack_webhook_url_own") or "",
+            placeholder="Leave blank to reuse the watchlist channel",
+            help="Keeping this separate stops urgent removals on your own accounts "
+                 "getting buried in routine competitor noise.",
+        )
+
         enabled = st.checkbox(
             "Send me notifications", value=bool(settings.get("slack_enabled", True))
         )
@@ -1367,13 +1378,17 @@ with tab_settings:
 
         if st.form_submit_button("Save settings", type="primary"):
             clean = webhook.strip()
-            if clean and not clean.startswith("https://hooks.slack.com/"):
+            clean_own = webhook_own.strip()
+            bad = [u for u in (clean, clean_own)
+                   if u and not u.startswith("https://hooks.slack.com/")]
+            if bad:
                 st.error("That doesn't look like a Slack webhook URL — it should start with https://hooks.slack.com/")
             else:
                 try:
                     supabase.table("user_settings").upsert({
                         "user_id": user["id"],
                         "slack_webhook_url": clean or None,
+                        "slack_webhook_url_own": clean_own or None,
                         "slack_enabled": enabled,
                         "notify_new_upload": n_new,
                         "notify_removed": n_removed,
@@ -1386,20 +1401,31 @@ with tab_settings:
                 except Exception as e:
                     st.error(f"Could not save: {e}")
 
-    if settings.get("slack_webhook_url"):
-        if st.button("Send a test message"):
+    def _slack_test(url, label, key):
+        if st.button(f"Send test to {label}", key=key):
             try:
                 r = requests.post(
-                    settings["slack_webhook_url"],
-                    json={"text": ":wave: Test from Play Store Watchdog — your webhook works."},
+                    url,
+                    json={"text": f":wave: Test from Play Store Watchdog — "
+                                  f"your *{label}* webhook works."},
                     timeout=15,
                 )
                 if r.status_code < 300:
-                    st.success("Sent — check your Slack channel.")
+                    st.success(f"Sent — check your {label} channel.")
                 else:
                     st.error(f"Slack rejected it (HTTP {r.status_code}): {r.text[:200]}")
             except Exception as e:
                 st.error(f"Could not reach Slack: {e}")
+
+    tcol1, tcol2 = st.columns(2)
+    with tcol1:
+        if settings.get("slack_webhook_url"):
+            _slack_test(settings["slack_webhook_url"], "watchlist", "test_wl")
+    with tcol2:
+        if settings.get("slack_webhook_url_own"):
+            _slack_test(settings["slack_webhook_url_own"], "my accounts", "test_own")
+        elif settings.get("slack_webhook_url"):
+            st.caption("My Accounts alerts will use the watchlist channel.")
 
     st.divider()
     st.subheader("Change your password")
