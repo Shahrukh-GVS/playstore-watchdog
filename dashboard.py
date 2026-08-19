@@ -22,14 +22,30 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from supabase import create_client
 
+import auth
+
 st.set_page_config(page_title="Play Store Watchdog", layout="wide")
 
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL"))
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY"))
-DISCORD_WEBHOOK_URL = st.secrets.get("DISCORD_WEBHOOK_URL", os.getenv("DISCORD_WEBHOOK_URL"))
+SUPABASE_ANON_KEY = st.secrets.get("SUPABASE_ANON_KEY", os.getenv("SUPABASE_ANON_KEY"))
+SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY"))  # service_role: user creation only
 APPSTORESPY_API_KEY = st.secrets.get("APPSTORESPY_API_KEY", os.getenv("APPSTORESPY_API_KEY"))
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+if not SUPABASE_ANON_KEY:
+    st.error(
+        "Missing **SUPABASE_ANON_KEY**. Add it to `.streamlit/secrets.toml` "
+        "(Supabase → Project Settings → API → `anon` `public` key)."
+    )
+    st.stop()
+
+# Login gate — nothing below runs until a user is signed in.
+if not auth.require_login(SUPABASE_URL, SUPABASE_ANON_KEY):
+    st.stop()
+
+# Every query below uses the signed-in user's client. Row Level Security means
+# the database returns only their rows, and inserts stamp user_id automatically.
+supabase = st.session_state.sb_client
+auth.render_account_sidebar(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 PKT = timezone(timedelta(hours=5))
 
@@ -492,9 +508,10 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab_search, tab_mine, tab2, tab_short, tab3, tab4 = st.tabs(
+tab1, tab_spy, tab_search, tab_mine, tab2, tab_short, tab3, tab4, tab_settings = st.tabs(
     ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🏢 My Accounts",
-     "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs"]
+     "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs",
+     "⚙️ Settings"]
 )
 
 # --- Tab 1: Trace ---
@@ -1304,3 +1321,116 @@ with tab4:
                     if uc3.button("Edit", key=f"unassigned_edit_{row['id']}"):
                         st.session_state.editing_id = row["id"]
                         st.rerun()
+
+# --- Tab: Settings ---
+with tab_settings:
+    user = st.session_state.sb_user
+    profile = auth.current_profile() or {}
+
+    st.subheader("Notifications")
+    st.caption(
+        "Your Slack webhook is stored against your account, so alerts for your "
+        "watchlist and your own accounts go to your channel. Nothing here is "
+        "hard-coded any more."
+    )
+
+    try:
+        settings_rows = supabase.table("user_settings").select("*") \
+            .eq("user_id", user["id"]).execute().data
+        settings = settings_rows[0] if settings_rows else {}
+    except Exception as e:
+        settings = {}
+        st.error(f"Could not load your settings: {e}")
+
+    with st.form("slack_settings_form"):
+        webhook = st.text_input(
+            "Slack webhook URL",
+            value=settings.get("slack_webhook_url") or "",
+            placeholder="https://hooks.slack.com/services/...",
+            help="Slack → your app → Incoming Webhooks → Add New Webhook to Workspace",
+        )
+        enabled = st.checkbox(
+            "Send me notifications", value=bool(settings.get("slack_enabled", True))
+        )
+
+        st.markdown("**Alert me about**")
+        c1, c2 = st.columns(2)
+        n_new = c1.checkbox("New uploads", value=bool(settings.get("notify_new_upload", True)))
+        n_removed = c1.checkbox("Removals", value=bool(settings.get("notify_removed", True)))
+        n_transfer = c2.checkbox("Transfers", value=bool(settings.get("notify_transferred", True)))
+        n_listing = c2.checkbox("Listing changes", value=bool(settings.get("notify_listing_changed", True)))
+        n_quiet = st.checkbox(
+            "Also tell me when a check found nothing",
+            value=bool(settings.get("notify_nothing_new", True)),
+            help="Turn this off if the 'nothing new' pings every 30 minutes get noisy.",
+        )
+
+        if st.form_submit_button("Save settings", type="primary"):
+            clean = webhook.strip()
+            if clean and not clean.startswith("https://hooks.slack.com/"):
+                st.error("That doesn't look like a Slack webhook URL — it should start with https://hooks.slack.com/")
+            else:
+                try:
+                    supabase.table("user_settings").upsert({
+                        "user_id": user["id"],
+                        "slack_webhook_url": clean or None,
+                        "slack_enabled": enabled,
+                        "notify_new_upload": n_new,
+                        "notify_removed": n_removed,
+                        "notify_transferred": n_transfer,
+                        "notify_listing_changed": n_listing,
+                        "notify_nothing_new": n_quiet,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    }, on_conflict="user_id").execute()
+                    st.success("Settings saved.")
+                except Exception as e:
+                    st.error(f"Could not save: {e}")
+
+    if settings.get("slack_webhook_url"):
+        if st.button("Send a test message"):
+            try:
+                r = requests.post(
+                    settings["slack_webhook_url"],
+                    json={"text": ":wave: Test from Play Store Watchdog — your webhook works."},
+                    timeout=15,
+                )
+                if r.status_code < 300:
+                    st.success("Sent — check your Slack channel.")
+                else:
+                    st.error(f"Slack rejected it (HTTP {r.status_code}): {r.text[:200]}")
+            except Exception as e:
+                st.error(f"Could not reach Slack: {e}")
+
+    st.divider()
+    st.subheader("Change your password")
+
+    with st.form("change_password_form", clear_on_submit=True):
+        new_pw = st.text_input("New password", type="password")
+        confirm_pw = st.text_input("Confirm new password", type="password")
+        if st.form_submit_button("Update password"):
+            ok, msg = auth.change_password(new_pw, confirm_pw)
+            (st.success if ok else st.error)(msg)
+
+    if auth.is_admin():
+        st.divider()
+        st.subheader("User management")
+        st.caption("Create accounts for other people. They sign in with the username "
+                   "and password you set, then change their own password here.")
+
+        with st.form("create_user_form", clear_on_submit=True):
+            nu_name = st.text_input("Username", placeholder="e.g. ali.hassan")
+            nu_pass = st.text_input("Initial password", type="password")
+            nu_admin = st.checkbox("Make this user an administrator")
+            if st.form_submit_button("Create user", type="primary"):
+                ok, msg = auth.create_user(SUPABASE_URL, SUPABASE_KEY,
+                                           nu_name, nu_pass, nu_admin)
+                (st.success if ok else st.error)(msg)
+
+        existing = auth.list_users(SUPABASE_URL, SUPABASE_KEY)
+        if existing:
+            st.dataframe(
+                [{"Username": u.get("username"),
+                  "Admin": "Yes" if u.get("is_admin") else "No",
+                  "Created": (u.get("created_at") or "")[:10]} for u in existing],
+                use_container_width=True, hide_index=True,
+            )
