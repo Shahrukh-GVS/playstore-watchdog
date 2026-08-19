@@ -23,10 +23,17 @@ SESSION_COOKIE = "psw_session"
 COOKIE_DAYS = 30
 
 
-@st.cache_resource
 def _cookies():
-    """One CookieManager for the whole app — creating more than one breaks it."""
-    return stx.CookieManager(key="psw_cookie_manager")
+    """One CookieManager per session.
+
+    This deliberately does NOT use @st.cache_resource — CookieManager renders a
+    hidden widget internally, and Streamlit forbids widget calls inside cached
+    functions. Stashing it in session_state gives us the same single-instance
+    behaviour without tripping that rule.
+    """
+    if "psw_cookie_mgr" not in st.session_state:
+        st.session_state.psw_cookie_mgr = stx.CookieManager(key="psw_cookie_manager")
+    return st.session_state.psw_cookie_mgr
 
 
 def _save_session_cookie(refresh_token):
