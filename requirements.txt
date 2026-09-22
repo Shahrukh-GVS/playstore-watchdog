@@ -6,3 +6,5 @@ python-dotenv
 Pillow
 imagehash
 streamlit
+google-auth
+pandas
