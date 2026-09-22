@@ -1204,8 +1204,8 @@ with tab_fb:
                     s[0].metric("Organic", f"{org_c:,.0f}", _delta(org_c, org_p))
                     s[1].metric("Campaign (paid)", f"{paid_c:,.0f}", _delta(paid_c, paid_p))
                     tot = org_c + paid_c
-                    s[2].metric("Organic share", f"{(org_c/tot*100) if tot else 0:.0f}%")
-                    s[3].metric("Paid share", f"{(paid_c/tot*100) if tot else 0:.0f}%")
+                    s[2].metric("Organic share", f"{(org_c/tot*100) if tot else 0:.1f}%")
+                    s[3].metric("Paid share", f"{(paid_c/tot*100) if tot else 0:.1f}%")
 
                     t1, t2, t3, t4 = st.tabs(["Channels", "Campaigns", "Countries", "Daily trend"])
                     with t1:
