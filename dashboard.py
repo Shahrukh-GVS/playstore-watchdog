@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 from supabase import create_client
 
 import auth
+import firebase_analytics as fa
 
 st.set_page_config(page_title="Play Store Watchdog", layout="wide")
 
@@ -50,6 +51,21 @@ supabase = st.session_state.sb_client
 auth.render_account_sidebar(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 PKT = timezone(timedelta(hours=5))
+
+# Usernames that get the studio selector in the My Accounts tab. Everyone else
+# sees the plain version. Add a username here to switch it on for them.
+# Needs 13-add-teams-for-my-accounts.sql to have been run in Supabase.
+TEAM_FEATURE_USERS = {"babar.gvs"}
+
+# Firebase tab: each user's games are labelled with their studio name.
+# Managers see every team's games and choose the team when adding one.
+FIREBASE_BRANDS = {
+    "shahrukh.gvs": "GamBuzz",
+    "nabeel.gvs": "NovaBolt",
+    "ayesha.gvs": "Gravity Ayesha",
+    "adeel.gvs": "Gravity Adeel",
+}
+FIREBASE_MANAGERS = {"babar.gvs"}
 
 
 def format_pkt(iso_str):
@@ -413,10 +429,13 @@ def discover_games_by_name(name, days_back, limit=100, country="US", pre_registe
         return None, f"Request failed: {e}"
 
 
-def add_own_account(account_label, dev_url):
+def add_own_account(account_label, dev_url, team_id=None):
     """Adds one of the user's own developer accounts directly (no app-ads.txt
-    matching needed, since ownership is already known). Pulls the full
-    catalog and inserts it, tagged source='own_account'."""
+    matching needed, since ownership is already known). Pulls the full catalog
+    and inserts it, tagged source='own_account' and filed under a team.
+
+    Note `team_id` is distinct from `studio_id`: studios group ad IDs for
+    tracing, teams group your own accounts."""
     dev_url = dev_url.strip()
     if not dev_url.startswith("http"):
         return {"status": "error", "message": "Please paste a full developer page URL."}
@@ -429,14 +448,18 @@ def add_own_account(account_label, dev_url):
     existing = supabase.table("developers").select("id").eq("dev_id", dev_id).execute()
     if existing.data:
         developer_id = existing.data[0]["id"]
-        supabase.table("developers").update({
-            "name": account_label, "source": "own_account",
-        }).eq("id", developer_id).execute()
+        update_row = {"name": account_label, "source": "own_account"}
+        if team_id is not None:  # team_id column only exists after migration 13
+            update_row["team_id"] = team_id
+        supabase.table("developers").update(update_row).eq("id", developer_id).execute()
     else:
-        result = supabase.table("developers").insert({
+        insert_row = {
             "dev_id": dev_id, "name": account_label,
             "developer_url": dev_url, "source": "own_account",
-        }).execute()
+        }
+        if team_id is not None:  # team_id column only exists after migration 13
+            insert_row["team_id"] = team_id
+        result = supabase.table("developers").insert(insert_row).execute()
         developer_id = result.data[0]["id"]
 
     catalog = fetch_developer_catalog(dev_url, developer_name=account_label)
@@ -510,8 +533,8 @@ def run_trace(url):
 
 st.title("Play Store Watchdog")
 
-tab1, tab_spy, tab_search, tab_mine, tab2, tab_short, tab3, tab4, tab_settings = st.tabs(
-    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🏢 My Accounts",
+tab1, tab_spy, tab_search, tab_mine, tab_fb, tab2, tab_short, tab3, tab4, tab_settings = st.tabs(
+    ["🔍 Trace", "📈 AppStore Spy", "🔎 Search by Name", "🏢 My Accounts", "🔥 Firebase",
      "📋 Watchlist", "⭐ Shortlisted", "🕒 Recent Activity", "🆔 Manage Ad IDs",
      "⚙️ Settings"]
 )
@@ -569,7 +592,7 @@ with tab_spy:
         st.session_state.spy_window = None
 
     pre_reg_only = st.checkbox("Pre-register only", key="spy_pre_reg_checkbox")
-    st.caption("Uses AppstoreSpy's 'pre_register' filter field (confirmed via their support team).")
+    st.caption("Uses AppstoreSpy's 'pre_register' filter field (confirmed via their support studio).")
 
     col1, col2, col3 = st.columns(3)
     fetch_7 = col1.button("📅 Top 100 (7 days)", use_container_width=True, type="primary")
@@ -764,19 +787,78 @@ with tab_search:
 # --- Tab: My Accounts ---
 with tab_mine:
     st.subheader("My Accounts")
-    st.caption("Add your own Google Play developer accounts here — no app-ads.txt matching needed, since ownership is already known. These get checked every 30 minutes by a separate monitor, with alerts to Discord and Slack.")
+    st.caption("Add your own Google Play developer accounts here — no app-ads.txt "
+               "matching needed, since ownership is already known. These are checked "
+               "every 30 minutes, with alerts to your Slack channel.")
+
+    # Teams are a separate concept from Studios: Studios group ad IDs for tracing,
+    # Teams group your own accounts. Only enabled for the usernames listed above.
+    _prof = auth.current_profile() or {}
+    show_teams = _prof.get("username") in TEAM_FEATURE_USERS
+
+    my_teams = []
+    if show_teams:
+        try:
+            my_teams = supabase.table("teams").select("*").order("name").execute().data
+        except Exception as e:
+            st.error(f"Could not load teams: {e}")
+
+    if show_teams:
+        with st.expander(f"🏷️ Manage teams ({len(my_teams)})"):
+            with st.form("add_team_form", clear_on_submit=True):
+                new_team = st.text_input("Team name", placeholder="e.g. Gambuzz")
+                if st.form_submit_button("Create team", type="primary"):
+                    if not new_team.strip():
+                        st.warning("Team name is required.")
+                    elif any(t["name"].lower() == new_team.strip().lower() for t in my_teams):
+                        st.warning(f"You already have a team called '{new_team.strip()}'.")
+                    else:
+                        try:
+                            supabase.table("teams").insert({"name": new_team.strip()}).execute()
+                            st.success(f"Team '{new_team.strip()}' created.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Could not create team: {e}")
+
+            for t in my_teams:
+                tc1, tc2 = st.columns([5, 1])
+                tc1.write(t["name"])
+                if tc2.button("Delete", key=f"del_team_{t['id']}"):
+                    # Accounts keep existing; they just fall back to Unassigned.
+                    supabase.table("developers").update({"team_id": None}) \
+                        .eq("team_id", t["id"]).execute()
+                    supabase.table("teams").delete().eq("id", t["id"]).execute()
+                    st.rerun()
+
+    team_names = [t["name"] for t in my_teams]
+    if show_teams and not my_teams:
+        st.warning("Create a team above before adding accounts, so each account can be filed under one.")
 
     with st.form("add_own_account_form", clear_on_submit=True):
         account_label = st.text_input("Account name (your own label)")
-        dev_url = st.text_input("Developer page URL", placeholder="https://play.google.com/store/apps/dev?id=... or /developer?id=...")
+        dev_url = st.text_input(
+            "Developer page URL",
+            placeholder="https://play.google.com/store/apps/dev?id=... or /developer?id=...",
+        )
+        chosen_team = None
+        if show_teams:
+            chosen_team = st.selectbox(
+                "Team", team_names if team_names else ["— no teams yet —"],
+                key="own_account_team_select",
+                help="Which team this account belongs to.",
+            )
         submitted = st.form_submit_button("➕ Add my account", type="primary")
 
         if submitted:
             if not account_label.strip() or not dev_url.strip():
                 st.warning("Both fields are required.")
+            elif show_teams and not my_teams:
+                st.error("Create a team first.")
             else:
+                team_id = (next((t["id"] for t in my_teams if t["name"] == chosen_team), None)
+                           if show_teams else None)
                 with st.spinner("Fetching account catalog..."):
-                    result = add_own_account(account_label.strip(), dev_url.strip())
+                    result = add_own_account(account_label.strip(), dev_url.strip(), team_id=team_id)
                 if result["status"] == "added":
                     st.success(result["message"])
                 else:
@@ -785,36 +867,61 @@ with tab_mine:
     st.markdown("---")
     st.subheader("Your registered accounts")
 
-    own_developers = supabase.table("developers").select("*").eq("source", "own_account").order("first_seen", desc=True).execute().data
+    own_developers = supabase.table("developers").select("*") \
+        .eq("source", "own_account").order("first_seen", desc=True).execute().data
     all_apps = supabase.table("apps").select("*").execute().data
+    my_team_by_id = {t["id"]: t["name"] for t in my_teams}
 
     if "confirm_delete_own" not in st.session_state:
         st.session_state.confirm_delete_own = None
 
+    team_filter = "All teams"
     if not own_developers:
         st.info("No own accounts added yet. Use the form above.")
+    elif show_teams and my_teams:
+        team_filter = st.selectbox(
+            "🏷️ Filter by team",
+            ["All teams"] + sorted(my_team_by_id.values()) + ["Unassigned"],
+            key="own_accounts_team_filter",
+        )
 
+    shown_any = False
     for dev in own_developers:
+        dev_team = my_team_by_id.get(dev.get("team_id"), "Unassigned")
+        if team_filter != "All teams" and dev_team != team_filter:
+            continue
+        shown_any = True
+
         dev_apps = [a for a in all_apps if a["developer_id"] == dev["id"]]
         active_count = len([a for a in dev_apps if a["status"] == "active"])
         removed_count = len([a for a in dev_apps if a["status"] == "removed"])
 
-        with st.expander(f"**{dev['name']}** — {active_count} active, {removed_count} removed ({len(dev_apps)} total)"):
+        label = f"**{dev['name']}**"
+        if show_teams:
+            label += f" [{dev_team}]"
+        with st.expander(f"{label} — {active_count} active, {removed_count} removed "
+                         f"({len(dev_apps)} total)"):
             st.caption(f"Developer page: {dev['developer_url']}")
-            st.caption(f"Last checked: {dev.get('last_checked', 'never')}")
+            st.caption((f"Team: {dev_team} | " if show_teams else "")
+                       + f"Last checked: {dev.get('last_checked', 'never')}")
+
+            if show_teams and my_teams:
+                idx = next((i for i, t in enumerate(my_teams)
+                            if t["id"] == dev.get("team_id")), 0)
+                move_to = st.selectbox("Move to team", team_names, index=idx,
+                                       key=f"move_team_{dev['id']}")
+                if move_to != dev_team and st.button("Save team", key=f"save_team_{dev['id']}"):
+                    new_tid = next(t["id"] for t in my_teams if t["name"] == move_to)
+                    supabase.table("developers").update({"team_id": new_tid}) \
+                        .eq("id", dev["id"]).execute()
+                    st.rerun()
 
             if dev_apps:
-                table_data = [{
-                    "Icon": a.get("icon_url"),
-                    "Title": a["title"],
-                    "Package": a["package_name"],
-                    "Status": a["status"],
-                } for a in dev_apps]
                 st.dataframe(
-                    table_data,
+                    [{"Icon": a.get("icon_url"), "Title": a["title"],
+                      "Package": a["package_name"], "Status": a["status"]} for a in dev_apps],
                     column_config={"Icon": st.column_config.ImageColumn("Icon", width="small")},
-                    use_container_width=True,
-                    hide_index=True,
+                    use_container_width=True, hide_index=True,
                 )
             else:
                 st.write("No apps recorded yet.")
@@ -822,8 +929,8 @@ with tab_mine:
             st.markdown("---")
             if st.session_state.confirm_delete_own == dev["id"]:
                 st.warning(f"Remove **{dev['name']}** from monitoring? This cannot be undone.")
-                dcol1, dcol2 = st.columns(2)
-                if dcol1.button("Yes, delete", key=f"own_confirm_yes_{dev['id']}", type="primary"):
+                dc1, dc2 = st.columns(2)
+                if dc1.button("Yes, delete", key=f"own_yes_{dev['id']}", type="primary"):
                     app_ids = [a["id"] for a in dev_apps]
                     if app_ids:
                         supabase.table("change_log").delete().in_("app_id", app_ids).execute()
@@ -832,13 +939,343 @@ with tab_mine:
                     supabase.table("developers").delete().eq("id", dev["id"]).execute()
                     st.session_state.confirm_delete_own = None
                     st.rerun()
-                if dcol2.button("Cancel", key=f"own_confirm_no_{dev['id']}"):
+                if dc2.button("Cancel", key=f"own_no_{dev['id']}"):
                     st.session_state.confirm_delete_own = None
                     st.rerun()
             else:
                 if st.button("🗑️ Remove from monitoring", key=f"own_delete_{dev['id']}"):
                     st.session_state.confirm_delete_own = dev["id"]
                     st.rerun()
+
+    if own_developers and not shown_any:
+        st.info(f"No accounts in '{team_filter}'.")
+
+
+# --- Tab: Firebase (GA4 analytics per game) ---
+with tab_fb:
+    me_id = st.session_state.sb_user["id"]
+    me_name = (auth.current_profile() or {}).get("username", "")
+    is_fb_mgr = me_name in FIREBASE_MANAGERS
+
+    st.subheader("Firebase analytics")
+    st.caption("Add a game by Play Store link or package name. Click **Open** to see its "
+               "users, sessions and traffic sources for any day next to the day before.")
+
+    if not fa.is_configured():
+        st.warning("Google Analytics isn't connected yet — add **[gcp_service_account]** to "
+                   "Streamlit secrets. You can still add games; data appears once it's set up.")
+
+    # user_id -> team label. Managers also get the other teams.
+    owner_label = {me_id: FIREBASE_BRANDS.get(me_name, me_name)}
+    if is_fb_mgr:
+        owner_label[me_id] = f"{me_name} (me)"
+        try:
+            prof_rows = supabase.table("profiles").select("user_id, username") \
+                .in_("username", list(FIREBASE_BRANDS)).execute().data
+        except Exception as e:
+            prof_rows = []
+            st.error(f"Could not load team users (has 14-firebase-games.sql been run?): {e}")
+        found = set()
+        for r in prof_rows:
+            owner_label[r["user_id"]] = FIREBASE_BRANDS[r["username"]]
+            found.add(r["username"])
+        missing = [u for u in FIREBASE_BRANDS if u not in found]
+        if missing:
+            st.caption("⚠️ Not created yet (Settings → User management): " + ", ".join(missing))
+    label_to_uid = {v: k for k, v in owner_label.items()}
+
+    # ---- Add a game ----
+    with st.form("fb_add_game", clear_on_submit=True):
+        fc1, fc2 = st.columns([3, 2]) if is_fb_mgr else (st.container(), None)
+        fb_input = fc1.text_input("Play Store URL or package name",
+                                  placeholder="https://play.google.com/store/apps/details?id=com.studio.game")
+        target_label = None
+        if is_fb_mgr:
+            team_order = [FIREBASE_BRANDS[u] for u in FIREBASE_BRANDS if FIREBASE_BRANDS[u] in label_to_uid]
+            team_order.append(owner_label[me_id])
+            target_label = fc2.selectbox("Add for which team?", team_order)
+        fb_submit = st.form_submit_button("➕ Add game", type="primary")
+
+    if fb_submit:
+        raw = (fb_input or "").strip()
+        pkg = extract_package_name(raw) if "id=" in raw else raw
+        pkg = (pkg or "").strip()
+        target_uid = label_to_uid.get(target_label, me_id) if is_fb_mgr else me_id
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+", pkg):
+            st.error("That doesn't look like a Play Store link or package name (e.g. com.studio.game).")
+        else:
+            visible = supabase.table("firebase_games").select("user_id") \
+                .eq("package_name", pkg).execute().data
+            taken_elsewhere = False
+            if not visible:
+                try:
+                    taken_elsewhere = bool(supabase.rpc("firebase_package_taken", {"pkg": pkg}).execute().data)
+                except Exception:
+                    taken_elsewhere = False
+            if visible:
+                st.warning(f"`{pkg}` is already added under **{owner_label.get(visible[0]['user_id'], 'your list')}**.")
+            elif taken_elsewhere:
+                st.warning(f"`{pkg}` is already added by another team.")
+            else:
+                with st.spinner("Looking up the game and its Google Analytics stream..."):
+                    try:
+                        soup = fetch_app_page(pkg)
+                    except Exception:
+                        soup = None  # Play Store unreachable — still add the game
+                    title = extract_canonical_title(soup) if soup else None
+                    icon = None
+                    if soup:
+                        og = soup.find("meta", attrs={"property": "og:image"})
+                        icon = og.get("content") if og else None
+                    link, link_err = (fa.find_stream(pkg) if fa.is_configured()
+                                      else (None, "Google Analytics not connected yet."))
+                row = {
+                    "user_id": target_uid, "package_name": pkg,
+                    "title": title or pkg, "icon_url": icon,
+                    "ga4_property_id": link["property_id"] if link else None,
+                    "ga4_property_name": link["property_name"] if link else None,
+                    "stream_id": link["stream_id"] if link else None,
+                    "link_error": link_err,
+                }
+                try:
+                    supabase.table("firebase_games").insert(row).execute()
+                    who = f" for **{target_label}**" if is_fb_mgr else ""
+                    st.success(f"Added **{title or pkg}**{who}.")
+                    if not soup:
+                        st.caption("Not found on the public Play Store (unpublished or pre-registration) — added anyway.")
+                    if link_err:
+                        st.warning(f"Added, but not linked to Analytics yet: {link_err}")
+                except Exception as e:
+                    if "duplicate" in str(e).lower() or "23505" in str(e):
+                        st.warning(f"`{pkg}` is already added.")
+                    else:
+                        st.error(f"Could not add game: {e}")
+
+    # ---- Game list ----
+    try:
+        fb_games = supabase.table("firebase_games").select("*") \
+            .order("created_at", desc=True).execute().data
+    except Exception as e:
+        fb_games = []
+        st.error(f"Could not load games (has 14-firebase-games.sql been run?): {e}")
+
+    for g in fb_games:
+        g["_team"] = owner_label.get(g["user_id"], "Other")
+
+    fl1, fl2 = st.columns([3, 2]) if is_fb_mgr else (st.container(), None)
+    fb_search = fl1.text_input("🔎 Search games", key="fb_search", placeholder="title or package")
+    fb_team = "All teams"
+    if is_fb_mgr:
+        fb_team = fl2.selectbox("Team", ["All teams"] + sorted({g["_team"] for g in fb_games}),
+                                key="fb_team_filter")
+    shown = [g for g in fb_games
+             if (fb_team == "All teams" or g["_team"] == fb_team)
+             and (not fb_search or fb_search.lower() in (g.get("title") or "").lower()
+                  or fb_search.lower() in g["package_name"].lower())]
+
+    # ---- Detail view for the opened game ----
+    open_id = st.session_state.get("fb_open")
+    game = next((g for g in fb_games if g["id"] == open_id), None)
+    if game:
+        with st.container(border=True):
+            h1, h2 = st.columns([1, 12])
+            if game.get("icon_url"):
+                h1.image(game["icon_url"], width=56)
+            h2.markdown(f"### {game.get('title') or game['package_name']}")
+            h2.caption(f"`{game['package_name']}`"
+                       + (f" · Team: **{game['_team']}**" if is_fb_mgr else "")
+                       + (f" · GA4: {game['ga4_property_name']} ({game['ga4_property_id']})"
+                          if game.get("ga4_property_id") else ""))
+
+            b1, b2, b3, _ = st.columns([1, 1, 1, 4])
+            if b1.button("✖ Close", key="fb_close"):
+                st.session_state.fb_open = None
+                st.rerun()
+            if b2.button("🔄 Refresh data", key="fb_refresh"):
+                fa.game_report.clear()
+                st.rerun()
+            with b3.popover("🗑 Remove"):
+                st.write("Remove this game from the list?")
+                if st.button("Yes, remove", key="fb_del_yes", type="primary"):
+                    supabase.table("firebase_games").delete().eq("id", game["id"]).execute()
+                    st.session_state.fb_open = None
+                    st.rerun()
+
+            if not game.get("ga4_property_id"):
+                st.warning(game.get("link_error") or "Not linked to Google Analytics yet.")
+                if fa.service_account_email():
+                    st.caption(f"Give **{fa.service_account_email()}** Viewer access on this game's "
+                               "GA4 property, then click Retry.")
+                if st.button("🔗 Retry linking", key="fb_relink"):
+                    link, err = fa.find_stream(game["package_name"], refresh=True)
+                    supabase.table("firebase_games").update({
+                        "ga4_property_id": link["property_id"] if link else None,
+                        "ga4_property_name": link["property_name"] if link else None,
+                        "stream_id": link["stream_id"] if link else None,
+                        "link_error": err,
+                    }).eq("id", game["id"]).execute()
+                    (st.success("Linked!") if link else st.error(err))
+                    st.rerun()
+            else:
+                d1, d2 = st.columns([1, 1])
+                sel_day = d1.date_input("Day", value=datetime.now(PKT).date(),
+                                        max_value=datetime.now(PKT).date(), key="fb_day")
+                span = d2.selectbox("Trend window", [7, 14, 30], index=1, key="fb_span")
+                prev_day = sel_day - timedelta(days=1)
+                try:
+                    with st.spinner("Fetching Google Analytics data..."):
+                        rep = fa.game_report(game["ga4_property_id"], game.get("stream_id"),
+                                             sel_day.isoformat(), span)
+                except Exception as e:
+                    rep = None
+                    st.error(f"Google Analytics error: {e}")
+
+                if rep is not None:
+                    by_day = {r["date"]: r for r in rep["daily"]}
+                    cur = by_day.get(sel_day.isoformat(), {})
+                    prv = by_day.get(prev_day.isoformat(), {})
+
+                    def _v(r, k):
+                        return r.get(k, 0.0)
+
+                    def _eng_per_user(r):
+                        return _v(r, "userEngagementDuration") / _v(r, "activeUsers") if _v(r, "activeUsers") else 0.0
+
+                    def _mmss(sec):
+                        sec = int(round(sec or 0))
+                        return f"{sec // 60}m {sec % 60:02d}s"
+
+                    def _delta(a, b, pct=False):
+                        if not b:
+                            return None
+                        return f"{(a - b) / b * 100:+.1f}%"
+
+                    st.markdown(f"**{sel_day:%a %d %b %Y}** vs {prev_day:%d %b}")
+                    if sel_day == datetime.now(PKT).date():
+                        st.caption("Today is still in progress — Google Analytics numbers fill in over a few hours.")
+                    m = st.columns(4)
+                    m[0].metric("Active users", f"{_v(cur,'activeUsers'):,.0f}",
+                                _delta(_v(cur,'activeUsers'), _v(prv,'activeUsers')))
+                    m[1].metric("New users", f"{_v(cur,'newUsers'):,.0f}",
+                                _delta(_v(cur,'newUsers'), _v(prv,'newUsers')))
+                    m[2].metric("Sessions", f"{_v(cur,'sessions'):,.0f}",
+                                _delta(_v(cur,'sessions'), _v(prv,'sessions')))
+                    m[3].metric("Engagement rate", f"{_v(cur,'engagementRate')*100:.1f}%",
+                                f"{(_v(cur,'engagementRate')-_v(prv,'engagementRate'))*100:+.1f} pts" if prv else None)
+                    m = st.columns(4)
+                    m[0].metric("Avg session duration", _mmss(_v(cur, "averageSessionDuration")),
+                                _delta(_v(cur,'averageSessionDuration'), _v(prv,'averageSessionDuration')))
+                    m[1].metric("Engagement time / user", _mmss(_eng_per_user(cur)),
+                                _delta(_eng_per_user(cur), _eng_per_user(prv)))
+                    m[2].metric("Sessions / user",
+                                f"{(_v(cur,'sessions')/_v(cur,'activeUsers')) if _v(cur,'activeUsers') else 0:.2f}")
+                    m[3].metric("Screen views", f"{_v(cur,'screenPageViews'):,.0f}",
+                                _delta(_v(cur,'screenPageViews'), _v(prv,'screenPageViews')))
+
+                    # Organic vs campaign (by the channel that first brought the user)
+                    def _split(day_iso):
+                        paid = org = 0.0
+                        for r in rep["channels"]:
+                            if r["date"] == day_iso:
+                                if fa.is_paid(r["firstUserDefaultChannelGroup"]):
+                                    paid += r["newUsers"]
+                                else:
+                                    org += r["newUsers"]
+                        return org, paid
+                    org_c, paid_c = _split(sel_day.isoformat())
+                    org_p, paid_p = _split(prev_day.isoformat())
+                    st.markdown("**New users by source**")
+                    s = st.columns(4)
+                    s[0].metric("Organic", f"{org_c:,.0f}", _delta(org_c, org_p))
+                    s[1].metric("Campaign (paid)", f"{paid_c:,.0f}", _delta(paid_c, paid_p))
+                    tot = org_c + paid_c
+                    s[2].metric("Organic share", f"{(org_c/tot*100) if tot else 0:.0f}%")
+                    s[3].metric("Paid share", f"{(paid_c/tot*100) if tot else 0:.0f}%")
+
+                    t1, t2, t3, t4 = st.tabs(["Channels", "Campaigns", "Countries", "Daily trend"])
+                    with t1:
+                        chans = {}
+                        for r in rep["channels"]:
+                            if r["date"] in (sel_day.isoformat(), prev_day.isoformat()):
+                                c = chans.setdefault(r["firstUserDefaultChannelGroup"], [0, 0])
+                                c[0 if r["date"] == sel_day.isoformat() else 1] += r["newUsers"]
+                        st.dataframe(
+                            [{"Channel": k, "Type": "Paid" if fa.is_paid(k) else "Organic/other",
+                              f"New users {sel_day:%d %b}": int(v[0]),
+                              f"New users {prev_day:%d %b}": int(v[1])}
+                             for k, v in sorted(chans.items(), key=lambda x: -x[1][0])],
+                            use_container_width=True, hide_index=True)
+                        st.caption("Installs from ad networks only show here if they're linked to "
+                                   "Firebase/GA4 (Google Ads link, or an MMP forwarding attribution). "
+                                   "Otherwise they appear as Direct / Unassigned.")
+                    with t2:
+                        camps = {}
+                        for r in rep["campaigns"]:
+                            if r["date"] in (sel_day.isoformat(), prev_day.isoformat()):
+                                key = (r["firstUserCampaignName"], r["firstUserSource"])
+                                c = camps.setdefault(key, [0, 0])
+                                c[0 if r["date"] == sel_day.isoformat() else 1] += r["newUsers"]
+                        st.dataframe(
+                            [{"Campaign": k[0], "Source": k[1],
+                              f"New users {sel_day:%d %b}": int(v[0]),
+                              f"New users {prev_day:%d %b}": int(v[1])}
+                             for k, v in sorted(camps.items(), key=lambda x: -x[1][0])],
+                            use_container_width=True, hide_index=True)
+                    with t3:
+                        ctry = {}
+                        for r in rep["countries"]:
+                            if r["date"] in (sel_day.isoformat(), prev_day.isoformat()):
+                                c = ctry.setdefault(r["country"], [0, 0])
+                                c[0 if r["date"] == sel_day.isoformat() else 1] += r["activeUsers"]
+                        st.dataframe(
+                            [{"Country": k, f"Active users {sel_day:%d %b}": int(v[0]),
+                              f"Active users {prev_day:%d %b}": int(v[1])}
+                             for k, v in sorted(ctry.items(), key=lambda x: -x[1][0])],
+                            use_container_width=True, hide_index=True)
+                    with t4:
+                        days_sorted = sorted(by_day)
+                        if days_sorted:
+                            import pandas as pd
+                            trend = pd.DataFrame(
+                                [{"Date": d, "Active users": by_day[d]["activeUsers"],
+                                  "New users": by_day[d]["newUsers"]} for d in days_sorted]
+                            ).set_index("Date")
+                            st.line_chart(trend)
+                        st.dataframe(
+                            [{"Date": d,
+                              "Active users": int(by_day[d]["activeUsers"]),
+                              "New users": int(by_day[d]["newUsers"]),
+                              "Sessions": int(by_day[d]["sessions"]),
+                              "Avg session": _mmss(by_day[d]["averageSessionDuration"]),
+                              "Engagement / user": _mmss(_eng_per_user(by_day[d])),
+                              "Engagement rate": f"{by_day[d]['engagementRate']*100:.1f}%"}
+                             for d in reversed(days_sorted)],
+                            use_container_width=True, hide_index=True)
+                        if not days_sorted:
+                            st.info("No data in this window yet.")
+
+    # ---- The list ----
+    if not fb_games:
+        st.info("No games yet — add one above.")
+    elif not shown:
+        st.info("No games match your filter.")
+    else:
+        st.markdown(f"**{len(shown)} game(s)**")
+        groups = ([(t, [g for g in shown if g["_team"] == t])
+                   for t in sorted({g["_team"] for g in shown})] if is_fb_mgr else [(None, shown)])
+        for team, items in groups:
+            if team:
+                st.markdown(f"#### {team} ({len(items)})")
+            for g in items:
+                c1, c2, c3, c4 = st.columns([1, 7, 2, 1])
+                if g.get("icon_url"):
+                    c1.image(g["icon_url"], width=40)
+                c2.markdown(f"**{g.get('title') or g['package_name']}**  \n`{g['package_name']}`")
+                c3.caption("✅ Linked to GA4" if g.get("ga4_property_id") else "⚠️ Not linked")
+                if c4.button("Open", key=f"fb_open_{g['id']}"):
+                    st.session_state.fb_open = g["id"]
+                    st.rerun()
+
 
 with tab2:
     st.subheader("Watched developers")
