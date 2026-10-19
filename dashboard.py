@@ -35,8 +35,8 @@ except Exception as _fa_err:  # file not deployed yet — keep the rest of the a
         raise RuntimeError("firebase_analytics.py is missing from the repo.")
     _fa_missing.clear = lambda: None
     fa = types.SimpleNamespace(
-        is_configured=lambda: False,
-        service_account_email=lambda: None,
+        is_configured=lambda *a, **k: False,
+        service_account_email=lambda *a, **k: None,
         find_stream=lambda *a, **k: (None, "firebase_analytics.py is missing from the repo."),
         game_report=_fa_missing,
         is_paid=lambda c: False,
@@ -81,6 +81,22 @@ FIREBASE_BRANDS = {
     "adeel.gvs": "Gravity Adeel",
 }
 FIREBASE_MANAGERS = {"babar.gvs"}
+
+# Each team reads Analytics with its OWN Google key (Streamlit secrets section),
+# so no single Google identity is shared across teams. Anyone not listed
+# (e.g. babar's own games) uses the default key.
+FIREBASE_KEYS = {
+    "shahrukh.gvs": "gcp_service_account",
+    "nabeel.gvs": "gcp_service_account_nabeel",
+    "ayesha.gvs": "gcp_service_account_ayesha",
+    "adeel.gvs": "gcp_service_account_adeel",
+}
+
+
+def firebase_key_for(username):
+    """The team's own key if it's in secrets, otherwise the shared default key."""
+    key = FIREBASE_KEYS.get(username, "gcp_service_account")
+    return key if fa.is_configured(key) else "gcp_service_account"
 
 
 def format_pkt(iso_str):
@@ -610,14 +626,14 @@ with tab_spy:
     st.caption("Uses AppstoreSpy's 'pre_register' filter field (confirmed via their support studio).")
 
     col1, col2, col3 = st.columns(3)
-    fetch_7 = col1.button("📅 Top 100 (7 days)", use_container_width=True, type="primary")
-    fetch_30 = col2.button("📅 Top 100 (30 days)", use_container_width=True, type="primary")
-    fetch_90 = col3.button("📅 Top 100 (90 days)", use_container_width=True, type="primary")
+    fetch_7 = col1.button("📅 Top 100 (7 days)", width="stretch", type="primary")
+    fetch_30 = col2.button("📅 Top 100 (30 days)", width="stretch", type="primary")
+    fetch_90 = col3.button("📅 Top 100 (90 days)", width="stretch", type="primary")
 
     col4, col5, col6 = st.columns(3)
-    fetch_7_1k = col4.button("📅 Top 1000 (7 days)", use_container_width=True)
-    fetch_30_1k = col5.button("📅 Top 1000 (30 days)", use_container_width=True)
-    fetch_90_1k = col6.button("📅 Top 1000 (90 days)", use_container_width=True)
+    fetch_7_1k = col4.button("📅 Top 1000 (7 days)", width="stretch")
+    fetch_30_1k = col5.button("📅 Top 1000 (30 days)", width="stretch")
+    fetch_90_1k = col6.button("📅 Top 1000 (90 days)", width="stretch")
     st.caption("⚠️ Top 1000 uses more API credits and tracing all results afterward will take significantly longer.")
 
     days_back, fetch_limit = None, 100
@@ -666,7 +682,7 @@ with tab_spy:
                 "Icon": st.column_config.ImageColumn("Icon", width="small"),
                 "Link": st.column_config.LinkColumn("Link", display_text="Open"),
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -757,7 +773,7 @@ with tab_search:
                 "Icon": st.column_config.ImageColumn("Icon", width="small"),
                 "Link": st.column_config.LinkColumn("Link", display_text="Open"),
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -936,7 +952,7 @@ with tab_mine:
                     [{"Icon": a.get("icon_url"), "Title": a["title"],
                       "Package": a["package_name"], "Status": a["status"]} for a in dev_apps],
                     column_config={"Icon": st.column_config.ImageColumn("Icon", width="small")},
-                    use_container_width=True, hide_index=True,
+                    width="stretch", hide_index=True,
                 )
             else:
                 st.write("No apps recorded yet.")
@@ -976,12 +992,14 @@ with tab_fb:
     st.caption("Add a game by Play Store link or package name. Click **Open** to see its "
                "users, sessions and traffic sources for any day next to the day before.")
 
-    if not fa.is_configured():
-        st.warning("Google Analytics isn't connected yet — add **[gcp_service_account]** to "
-                   "Streamlit secrets. You can still add games; data appears once it's set up.")
+    if not is_fb_mgr and not fa.is_configured(firebase_key_for(me_name)):
+        st.warning("Google Analytics isn't connected yet for your team — add **["
+                   + firebase_key_for(me_name)
+                   + "]** to Streamlit secrets. You can still add games; data appears once it's set up.")
 
     # user_id -> team label. Managers also get the other teams.
     owner_label = {me_id: FIREBASE_BRANDS.get(me_name, me_name)}
+    owner_user = {me_id: me_name}  # user_id -> username, to pick that team's Google key
     if is_fb_mgr:
         owner_label[me_id] = f"{me_name} (me)"
         try:
@@ -993,10 +1011,16 @@ with tab_fb:
         found = set()
         for r in prof_rows:
             owner_label[r["user_id"]] = FIREBASE_BRANDS[r["username"]]
+            owner_user[r["user_id"]] = r["username"]
             found.add(r["username"])
         missing = [u for u in FIREBASE_BRANDS if u not in found]
         if missing:
             st.caption("⚠️ Not created yet (Settings → User management): " + ", ".join(missing))
+        if not fa.is_configured("gcp_service_account"):
+            st.caption("🔑 Google key not added yet — add [gcp_service_account] to Streamlit secrets.")
+
+    def fb_key(user_id):
+        return firebase_key_for(owner_user.get(user_id))
     label_to_uid = {v: k for k, v in owner_label.items()}
 
     # ---- Add a game ----
@@ -1042,8 +1066,7 @@ with tab_fb:
                     if soup:
                         og = soup.find("meta", attrs={"property": "og:image"})
                         icon = og.get("content") if og else None
-                    link, link_err = (fa.find_stream(pkg) if fa.is_configured()
-                                      else (None, "Google Analytics not connected yet."))
+                    link, link_err = fa.find_stream(pkg, key=fb_key(target_uid))
                 row = {
                     "user_id": target_uid, "package_name": pkg,
                     "title": title or pkg, "icon_url": icon,
@@ -1118,11 +1141,12 @@ with tab_fb:
 
             if not game.get("ga4_property_id"):
                 st.warning(game.get("link_error") or "Not linked to Google Analytics yet.")
-                if fa.service_account_email():
-                    st.caption(f"Give **{fa.service_account_email()}** Viewer access on this game's "
+                if fa.service_account_email(fb_key(game["user_id"])):
+                    st.caption(f"Give **{fa.service_account_email(fb_key(game['user_id']))}** Viewer access on this game's "
                                "GA4 property, then click Retry.")
                 if st.button("🔗 Retry linking", key="fb_relink"):
-                    link, err = fa.find_stream(game["package_name"], refresh=True)
+                    link, err = fa.find_stream(game["package_name"], refresh=True,
+                                               key=fb_key(game["user_id"]))
                     supabase.table("firebase_games").update({
                         "ga4_property_id": link["property_id"] if link else None,
                         "ga4_property_name": link["property_name"] if link else None,
@@ -1140,7 +1164,8 @@ with tab_fb:
                 try:
                     with st.spinner("Fetching Google Analytics data..."):
                         rep = fa.game_report(game["ga4_property_id"], game.get("stream_id"),
-                                             sel_day.isoformat(), span)
+                                             sel_day.isoformat(), span,
+                                             key=fb_key(game["user_id"]))
                 except Exception as e:
                     rep = None
                     st.error(f"Google Analytics error: {e}")
@@ -1219,7 +1244,7 @@ with tab_fb:
                               f"New users {sel_day:%d %b}": int(v[0]),
                               f"New users {prev_day:%d %b}": int(v[1])}
                              for k, v in sorted(chans.items(), key=lambda x: -x[1][0])],
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
                         st.caption("Installs from ad networks only show here if they're linked to "
                                    "Firebase/GA4 (Google Ads link, or an MMP forwarding attribution). "
                                    "Otherwise they appear as Direct / Unassigned.")
@@ -1235,7 +1260,7 @@ with tab_fb:
                               f"New users {sel_day:%d %b}": int(v[0]),
                               f"New users {prev_day:%d %b}": int(v[1])}
                              for k, v in sorted(camps.items(), key=lambda x: -x[1][0])],
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
                     with t3:
                         ctry = {}
                         for r in rep["countries"]:
@@ -1246,7 +1271,7 @@ with tab_fb:
                             [{"Country": k, f"Active users {sel_day:%d %b}": int(v[0]),
                               f"Active users {prev_day:%d %b}": int(v[1])}
                              for k, v in sorted(ctry.items(), key=lambda x: -x[1][0])],
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
                     with t4:
                         days_sorted = sorted(by_day)
                         if days_sorted:
@@ -1265,7 +1290,7 @@ with tab_fb:
                               "Engagement / user": _mmss(_eng_per_user(by_day[d])),
                               "Engagement rate": f"{by_day[d]['engagementRate']*100:.1f}%"}
                              for d in reversed(days_sorted)],
-                            use_container_width=True, hide_index=True)
+                            width="stretch", hide_index=True)
                         if not days_sorted:
                             st.info("No data in this window yet.")
 
@@ -1440,7 +1465,7 @@ with tab2:
                         "Icon": st.column_config.ImageColumn("Icon", width="small"),
                     },
                     disabled=["Icon", "Title", "Package", "Status", "Installs", "Pre-registration"],
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                     key=f"editor_{dev['id']}",
                 )
@@ -1508,7 +1533,7 @@ with tab_short:
                 "Icon": st.column_config.ImageColumn("Icon", width="small"),
             },
             disabled=["Icon", "Title", "Developer", "Package", "Status"],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             key="shortlist_editor",
         )
@@ -1815,7 +1840,7 @@ with tab4:
             data=buf.getvalue(),
             file_name=f"ad-ids-{datetime.now(PKT).strftime('%Y-%m-%d')}.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
         )
 
     with imp_col:
@@ -1884,7 +1909,7 @@ with tab4:
                     with st.expander(f"Skipped IDs ({len(dupes)})"):
                         st.dataframe(
                             [{"Account ID": a, "Already in": s} for a, s in dupes],
-                            use_container_width=True, hide_index=True,
+                            width="stretch", hide_index=True,
                         )
                 if to_add:
                     with st.expander(f"IDs to add ({len(to_add)})", expanded=True):
@@ -1892,7 +1917,7 @@ with tab4:
                             [{"Studio": r["studio"], "Network": r["network"],
                               "Account ID": r["account_id"], "Label": r["label"]}
                              for r in to_add],
-                            use_container_width=True, hide_index=True,
+                            width="stretch", hide_index=True,
                         )
 
                 if to_add or new_studios:
@@ -2073,5 +2098,5 @@ with tab_settings:
                 [{"Username": u.get("username"),
                   "Admin": "Yes" if u.get("is_admin") else "No",
                   "Created": (u.get("created_at") or "")[:10]} for u in existing],
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )

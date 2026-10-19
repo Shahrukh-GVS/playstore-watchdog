@@ -1,9 +1,10 @@
 """Google Analytics 4 (Firebase Analytics) reader for the Firebase tab.
 
-Everything goes through ONE Google Cloud service account whose JSON key lives in
-Streamlit secrets under [gcp_service_account]. The service account only needs
-"Viewer" access in Google Analytics — no Firebase project role is required,
-because Firebase Analytics data is stored in the linked GA4 property.
+Each team has its OWN Google Cloud service account (created with that team's
+own Gmail), stored in Streamlit secrets under its own section, e.g.
+[gcp_service_account] for GamBuzz and [gcp_service_account_nabeel] for NovaBolt.
+No single Google identity can read more than one team's Analytics.
+Each service account only needs "Viewer" in that team's Google Analytics.
 
 Flow:
   package name --(Analytics Admin API)--> GA4 property + Android data stream
@@ -33,37 +34,40 @@ class GAError(Exception):
 # Auth
 # ---------------------------------------------------------------------------
 
-def is_configured():
+DEFAULT_KEY = "gcp_service_account"
+
+
+def is_configured(key=DEFAULT_KEY):
     try:
-        return "gcp_service_account" in st.secrets
+        return key in st.secrets
     except Exception:
         return False
 
 
-def service_account_email():
+def service_account_email(key=DEFAULT_KEY):
     try:
-        return st.secrets["gcp_service_account"].get("client_email")
+        return st.secrets[key].get("client_email")
     except Exception:
         return None
 
 
 @st.cache_resource(show_spinner=False)
-def _session():
+def _session(key=DEFAULT_KEY):
     from google.oauth2 import service_account
     from google.auth.transport.requests import AuthorizedSession
 
-    if not is_configured():
+    if not is_configured(key):
         raise GAError(
-            "Missing **[gcp_service_account]** in Streamlit secrets. "
-            "Paste the service account JSON key there (see setup guide)."
+            f"Missing **[{key}]** in Streamlit secrets. "
+            "Paste that team's service account JSON key there (see setup guide)."
         )
-    info = dict(st.secrets["gcp_service_account"])
+    info = dict(st.secrets[key])
     creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
     return AuthorizedSession(creds)
 
 
-def _call(method, url, **kwargs):
-    resp = _session().request(method, url, timeout=30, **kwargs)
+def _call(method, url, key=DEFAULT_KEY, **kwargs):
+    resp = _session(key).request(method, url, timeout=30, **kwargs)
     if resp.status_code >= 400:
         try:
             msg = resp.json().get("error", {}).get("message", resp.text)
@@ -80,7 +84,7 @@ def _call(method, url, **kwargs):
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def android_stream_index():
+def android_stream_index(key=DEFAULT_KEY):
     """{package_name: {property_id, property_name, stream_id, app_id}} for every
     Android stream the service account can see. Cached for an hour."""
     index = {}
@@ -90,7 +94,7 @@ def android_stream_index():
         params = {"pageSize": 200}
         if page_token:
             params["pageToken"] = page_token
-        data = _call("GET", f"{ADMIN}/accountSummaries", params=params)
+        data = _call("GET", f"{ADMIN}/accountSummaries", key, params=params)
         for acc in data.get("accountSummaries", []):
             for prop in acc.get("propertySummaries", []):
                 properties.append((prop["property"], prop.get("displayName", "")))
@@ -105,7 +109,7 @@ def android_stream_index():
             if token:
                 params["pageToken"] = token
             try:
-                data = _call("GET", f"{ADMIN}/{prop_path}/dataStreams", params=params)
+                data = _call("GET", f"{ADMIN}/{prop_path}/dataStreams", key, params=params)
             except GAError:
                 break  # one inaccessible property shouldn't break the rest
             for s in data.get("dataStreams", []):
@@ -124,18 +128,25 @@ def android_stream_index():
     return index
 
 
-def find_stream(package_name, refresh=False):
+def find_stream(package_name, refresh=False, key=DEFAULT_KEY):
     """-> (link_dict or None, error_message or None)"""
+    if not is_configured(key):
+        return None, f"This team's Google key isn't set up yet — add [{key}] to Streamlit secrets."
     try:
         if refresh:
             android_stream_index.clear()
-        link = android_stream_index().get(package_name.lower())
+        link = android_stream_index(key).get(package_name.lower())
+        if not link and not refresh:
+            # The index is cached for an hour; a game set up in Firebase since
+            # then won't be in it yet, so look again with a fresh copy.
+            android_stream_index.clear()
+            link = android_stream_index(key).get(package_name.lower())
     except GAError as e:
         return None, str(e)
     except Exception as e:
         return None, f"Could not reach Google Analytics: {e}"
     if not link:
-        who = service_account_email() or "the service account"
+        who = service_account_email(key) or "the service account"
         return None, (f"No GA4 Android stream for `{package_name}` is visible to {who}. "
                       "Add that email as Viewer on the game's GA4 property (or account).")
     return link, None
@@ -145,7 +156,8 @@ def find_stream(package_name, refresh=False):
 # Reports
 # ---------------------------------------------------------------------------
 
-def _run_report(property_id, stream_id, start, end, dimensions, metrics, limit=10000):
+def _run_report(property_id, stream_id, start, end, dimensions, metrics, limit=10000,
+                key=DEFAULT_KEY):
     body = {
         "dateRanges": [{"startDate": start.isoformat(), "endDate": end.isoformat()}],
         "dimensions": [{"name": d} for d in dimensions],
@@ -156,13 +168,15 @@ def _run_report(property_id, stream_id, start, end, dimensions, metrics, limit=1
     if stream_id:
         body["dimensionFilter"] = {"filter": {
             "fieldName": "streamId", "stringFilter": {"value": str(stream_id)}}}
-    data = _call("POST", f"{DATA}/properties/{property_id}:runReport", json=body)
+    data = _call("POST", f"{DATA}/properties/{property_id}:runReport", key, json=body)
 
     rows = []
     for r in data.get("rows", []):
         row = {}
-        for d, v in zip(dimensions, r.get("dimensionValues", [])):
-            val = v.get("value")
+        dim_values = r.get("dimensionValues", [])
+        for i, d in enumerate(dimensions):
+            # Missing values shouldn't happen, but a short row must not crash the tab.
+            val = dim_values[i].get("value") if i < len(dim_values) else None
             if d == "date" and val and len(val) == 8:
                 val = f"{val[:4]}-{val[4:6]}-{val[6:]}"
             row[d] = val
@@ -183,21 +197,21 @@ DAILY_METRICS = [
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def game_report(property_id, stream_id, end_iso, days):
+def game_report(property_id, stream_id, end_iso, days, key=DEFAULT_KEY):
     """Everything the detail view needs, for `days` days ending on end_iso.
     Cached 10 minutes per game/date so clicking around is cheap."""
     end = date.fromisoformat(end_iso)
     start = end - timedelta(days=max(days, 2) - 1)
 
-    daily = _run_report(property_id, stream_id, start, end, ["date"], DAILY_METRICS)
+    daily = _run_report(property_id, stream_id, start, end, ["date"], DAILY_METRICS, key=key)
     channels = _run_report(property_id, stream_id, start, end,
                            ["date", "firstUserDefaultChannelGroup"],
-                           ["newUsers", "activeUsers"])
+                           ["newUsers", "activeUsers"], key=key)
     campaigns = _run_report(property_id, stream_id, start, end,
                             ["date", "firstUserCampaignName", "firstUserSource"],
-                            ["newUsers", "activeUsers"])
+                            ["newUsers", "activeUsers"], key=key)
     countries = _run_report(property_id, stream_id, start, end,
-                            ["date", "country"], ["activeUsers", "newUsers"])
+                            ["date", "country"], ["activeUsers", "newUsers"], key=key)
     return {"daily": daily, "channels": channels,
             "campaigns": campaigns, "countries": countries}
 
