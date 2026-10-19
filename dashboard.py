@@ -381,8 +381,8 @@ def discover_games(days_back, limit=100, country="US", pre_register_only=False,
     start = today - timedelta(days=days_back)
 
     filter_body = {
-        # GAME = games only, APPLICATION = everything that isn't a game
-        "category_type": "GAME" if games_only else "APPLICATION",
+        # The API accepts only these two values: GAME or APP
+        "category_type": "GAME" if games_only else "APP",
         "release_date": {"gte": start.isoformat(), "lte": today.isoformat()},
     }
     if pre_register_only:
@@ -430,8 +430,8 @@ def discover_games_by_name(name, days_back, limit=100, country="US", pre_registe
 
     filter_body = {
         "name": name,
-        # GAME = games only, APPLICATION = everything that isn't a game
-        "category_type": "GAME" if games_only else "APPLICATION",
+        # The API accepts only these two values: GAME or APP
+        "category_type": "GAME" if games_only else "APP",
         "published": True,
         "release_date": {"gte": start.isoformat(), "lte": today.isoformat()},
     }
